@@ -18,59 +18,7 @@ from src.io.dataset_loader import DatasetBatch, load_dataset
 from src.state.builder import FEATURE_DIM, build_features
 from src.generate_dataset import main as generate_dataset
 
-
-# ---------------------------------------------------------------------------
-# Fixtures — mirror test_dataset_loader.py exactly
-# ---------------------------------------------------------------------------
-
-N_PATHS = 200
-N_STEPS = 5
-SEED    = 0
-T1      = N_STEPS + 1
-
-
-def _gen(tmp_path: Path, sim: str) -> Path:
-    return generate_dataset([
-        "--sim",            sim,
-        "--n_paths",        str(N_PATHS),
-        "--n_steps",        str(N_STEPS),
-        "--seed",           str(SEED),
-        "--out_root",       str(tmp_path),
-        "--run_id",         f"test_{sim}",
-        "--strike",         "100.0",
-        "--maturity_years", "0.25",
-    ])
-
-
-@pytest.fixture(scope="session")
-def bs_run(tmp_path_factory) -> Path:
-    return _gen(tmp_path_factory.mktemp("bs"), "bs")
-
-
-@pytest.fixture(scope="session")
-def heston_run(tmp_path_factory) -> Path:
-    return _gen(tmp_path_factory.mktemp("heston"), "heston")
-
-
-@pytest.fixture(scope="session")
-def nga_run(tmp_path_factory) -> Path:
-    return _gen(tmp_path_factory.mktemp("nga"), "nga")
-
-
-@pytest.fixture(scope="session")
-def bs_batch(bs_run) -> DatasetBatch:
-    return load_dataset(bs_run, split="train")
-
-
-@pytest.fixture(scope="session")
-def heston_batch(heston_run) -> DatasetBatch:
-    return load_dataset(heston_run, split="train")
-
-
-@pytest.fixture(scope="session")
-def nga_batch(nga_run) -> DatasetBatch:
-    return load_dataset(nga_run, split="train")
-
+from tests.conftest import N_PATHS, N_STEPS, T1
 
 # ---------------------------------------------------------------------------
 # Shape and dtype tests

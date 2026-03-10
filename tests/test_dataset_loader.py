@@ -22,44 +22,7 @@ import torch
 from src.generate_dataset import main as generate_dataset
 from src.io.dataset_loader import DatasetBatch, load_dataset, load_split_sizes
 
-
-# ---------------------------------------------------------------------------
-# Fixtures — generate small datasets once per test session
-# ---------------------------------------------------------------------------
-
-N_PATHS = 200
-N_STEPS = 5
-SEED    = 0
-T1      = N_STEPS + 1   # 6  (t=0..5)
-
-
-def _gen(tmp_path: Path, sim: str) -> Path:
-    """Generate a minimal dataset and return its run_dir."""
-    return generate_dataset([
-        "--sim",      sim,
-        "--n_paths",  str(N_PATHS),
-        "--n_steps",  str(N_STEPS),
-        "--seed",     str(SEED),
-        "--out_root", str(tmp_path),
-        "--run_id",   f"test_{sim}",
-        "--strike",   "100.0",
-        "--maturity_years", "0.25",   # short maturity keeps float comparisons clean
-    ])
-
-
-@pytest.fixture(scope="session")
-def bs_run(tmp_path_factory) -> Path:
-    return _gen(tmp_path_factory.mktemp("bs"), "bs")
-
-
-@pytest.fixture(scope="session")
-def heston_run(tmp_path_factory) -> Path:
-    return _gen(tmp_path_factory.mktemp("heston"), "heston")
-
-
-@pytest.fixture(scope="session")
-def nga_run(tmp_path_factory) -> Path:
-    return _gen(tmp_path_factory.mktemp("nga"), "nga")
+from tests.conftest import N_PATHS, N_STEPS, T1
 
 
 # ---------------------------------------------------------------------------

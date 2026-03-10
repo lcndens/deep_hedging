@@ -12,6 +12,12 @@ OBS_SCHEMA = pa.schema([
     ("S", pa.float32()),
 ])
 
+LATENT_STATE_SCHEMA = pa.schema([
+    ("path_id", pa.int64()),
+    ("t_idx", pa.int32()),
+    ("v", pa.float32()),
+])
+
 # One contract per dataset for now
 CONTRACTS_SCHEMA = pa.schema([
     ("contract_id", pa.int32()),

@@ -13,7 +13,7 @@ class BSParams:
     Attributes define market parameters, the time grid, and simulation size.
     """
 
-    # Defaults locked by your decision (Option A)
+    # Defaults locked by your decision
     s0: float = 100.0
     sigma: float = 0.2
     m: float = 0.0  # drift in dS = m S dt + sigma S dW
@@ -25,13 +25,16 @@ class BSParams:
     seed: int = 42
 
 
-def simulate_observations(cfg: BSParams) -> pd.DataFrame:
+def simulate_observations(cfg: BSParams) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Simulate GBM paths under Black–Scholes:
         dS_t = m S_t dt + sigma S_t dW_t
 
-    Returns long-format DataFrame with columns:
+    Returns a pair of long-format DataFrames:
+        observations:
         path_id (int64), t_idx (int32), t_years (float32), S (float32)
+        latent state:
+        path_id (int64), t_idx (int32), v (float32, zero placeholder)
 
     Note: No 'split' column is ever created.
     """
@@ -78,4 +81,15 @@ def simulate_observations(cfg: BSParams) -> pd.DataFrame:
     df["t_years"] = df["t_years"].astype("float32")
     df["S"] = df["S"].astype("float32")
 
-    return df
+    latent_df = pd.DataFrame(
+        {
+            "path_id": path_id,
+            "t_idx": t_idx,
+            "v": np.zeros(path_id.shape[0], dtype=np.float32),
+        }
+    )
+    latent_df["path_id"] = latent_df["path_id"].astype("int64")
+    latent_df["t_idx"] = latent_df["t_idx"].astype("int32")
+    latent_df["v"] = latent_df["v"].astype("float32")
+
+    return df, latent_df

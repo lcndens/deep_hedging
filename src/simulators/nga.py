@@ -48,8 +48,8 @@ def _check_interval(lo: float, hi: float, name: str) -> None:
         raise ValueError(f"{name}: max < min ({hi} < {lo})")
 
 
-def simulate_observations(cfg: NGAParams) -> pd.DataFrame:
-    """Simulate NGA paths and return canonical long-format observations."""
+def simulate_observations(cfg: NGAParams) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Simulate NGA paths and return observations plus latent-state placeholders."""
     if cfg.n_steps <= 0:
         raise ValueError("n_steps must be positive")
     if cfg.n_paths <= 0:
@@ -110,4 +110,15 @@ def simulate_observations(cfg: NGAParams) -> pd.DataFrame:
     df["t_years"] = df["t_years"].astype("float32")
     df["S"] = df["S"].astype("float32")
 
-    return df
+    latent_df = pd.DataFrame(
+        {
+            "path_id": path_id,
+            "t_idx": t_idx,
+            "v": np.zeros(path_id.shape[0], dtype=np.float32),
+        }
+    )
+    latent_df["path_id"] = latent_df["path_id"].astype("int64")
+    latent_df["t_idx"] = latent_df["t_idx"].astype("int32")
+    latent_df["v"] = latent_df["v"].astype("float32")
+
+    return df, latent_df

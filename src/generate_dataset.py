@@ -13,7 +13,12 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from src.schema.v1_0 import SCHEMA_VERSION, OBS_SCHEMA, CONTRACTS_SCHEMA
+from src.schema.v1_0 import (
+    SCHEMA_VERSION,
+    OBS_SCHEMA,
+    LATENT_STATE_SCHEMA,
+    CONTRACTS_SCHEMA,
+)
 from src.io.parquet_writer import write_parquet_part
 from src.utils.split import SplitConfig, split_path_ids
 
@@ -120,7 +125,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             n_paths=args.n_paths,
             seed=args.seed,
         )
-        obs = simulate_bs(sim_cfg)
+        obs, latent_state = simulate_bs(sim_cfg)
         simulator_name = "BS"
         simulator_params = asdict(sim_cfg)
 
@@ -138,7 +143,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             n_paths=args.n_paths,
             seed=args.seed,
         )
-        obs = simulate_heston(sim_cfg)
+        obs, latent_state = simulate_heston(sim_cfg)
         simulator_name = "Heston"
         simulator_params = asdict(sim_cfg)
 
@@ -155,7 +160,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             n_paths=args.n_paths,
             seed=args.seed,
         )
-        obs = simulate_nga(sim_cfg)
+        obs, latent_state = simulate_nga(sim_cfg)
         simulator_name = "NGA"
         simulator_params = asdict(sim_cfg)
 
@@ -168,13 +173,29 @@ def main(argv: Sequence[str] | None = None) -> Path:
         raise ValueError(f"Observations columns mismatch. expected={obs_cols}, got={list(obs.columns)}")
     obs = obs.loc[:, obs_cols].copy()
 
+    latent_cols = [f.name for f in LATENT_STATE_SCHEMA]
+    if set(latent_state.columns) != set(latent_cols):
+        raise ValueError(
+            f"Latent-state columns mismatch. expected={latent_cols}, got={list(latent_state.columns)}"
+        )
+    latent_state = latent_state.loc[:, latent_cols].copy()
+
     # Split path ids and write splits to non-hive folder names
     splits = split_path_ids(n_paths=args.n_paths, seed=args.seed, cfg=split_cfg)
 
     for split_name, ids in splits.items():
-        split_df = obs[obs["path_id"].isin(ids)].loc[:, obs_cols].copy()
-        out_dir = run_dir / "observations" / split_name  # train/val/test
-        write_parquet_part(split_df, out_dir=out_dir, schema=OBS_SCHEMA, compression="zstd")
+        split_obs_df = obs[obs["path_id"].isin(ids)].loc[:, obs_cols].copy()
+        obs_out_dir = run_dir / "observations" / split_name  # train/val/test
+        write_parquet_part(split_obs_df, out_dir=obs_out_dir, schema=OBS_SCHEMA, compression="zstd")
+
+        split_latent_df = latent_state[latent_state["path_id"].isin(ids)].loc[:, latent_cols].copy()
+        latent_out_dir = run_dir / "latent_state" / split_name  # train/val/test
+        write_parquet_part(
+            split_latent_df,
+            out_dir=latent_out_dir,
+            schema=LATENT_STATE_SCHEMA,
+            compression="zstd",
+        )
 
     # Contracts + metadata
     write_contracts(run_dir / "contracts.parquet", args.contract_type, args.strike, args.maturity_years)
@@ -198,6 +219,11 @@ def main(argv: Sequence[str] | None = None) -> Path:
             "type": args.contract_type,
             "strike": args.strike,
             "maturity_years": args.maturity_years,
+        },
+        "latent_state": {
+            "schema_version": "v1.0",
+            "columns": ["path_id", "t_idx", "v"],
+            "note": "v is actual variance for heston; 0.0 placeholder for bs and nga",
         },
         "notes": "Schema v1.0 observations: path_id, t_idx, t_years, S. Splits are folders train/val/test.",
     }

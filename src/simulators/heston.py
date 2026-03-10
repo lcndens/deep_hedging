@@ -34,7 +34,7 @@ class HestonParams:
     seed: int = 42
 
 
-def simulate_observations(cfg: HestonParams) -> pd.DataFrame:
+def simulate_observations(cfg: HestonParams) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Full truncation Euler Heston simulation:
       dS_t = m S_t dt + sqrt(v_t) S_t dW^S_t
@@ -42,7 +42,11 @@ def simulate_observations(cfg: HestonParams) -> pd.DataFrame:
       corr(dW^S, dW^v) = rho
 
     We clamp variance in the diffusion and drift using v_pos = max(v, 0).
-    Only S is returned (observable-only dataset).
+    Returns:
+      observations:
+        path_id (int64), t_idx (int32), t_years (float32), S (float32)
+      latent state:
+        path_id (int64), t_idx (int32), v (float32)
     """
     if cfg.n_steps <= 0:
         raise ValueError("n_steps must be positive")
@@ -107,4 +111,11 @@ def simulate_observations(cfg: HestonParams) -> pd.DataFrame:
     df["t_years"] = df["t_years"].astype("float32")
     df["S"] = df["S"].astype("float32")
 
-    return df
+    v_floor = np.float64(np.finfo(np.float32).tiny)
+    v_long = np.maximum(v, v_floor).astype(np.float32).reshape(-1)
+    latent_df = pd.DataFrame({"path_id": path_id, "t_idx": t_idx, "v": v_long})
+    latent_df["path_id"] = latent_df["path_id"].astype("int64")
+    latent_df["t_idx"] = latent_df["t_idx"].astype("int32")
+    latent_df["v"] = latent_df["v"].astype("float32")
+
+    return df, latent_df

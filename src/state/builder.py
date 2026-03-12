@@ -1,24 +1,8 @@
-"""State construction for deep hedging pipeline — Stage 2.
+"""Feature construction for the deep-hedging information process.
 
-Transforms raw DatasetBatch tensors into the feature tensor I_t that the
-policy network observes at each rebalancing timestep.
-
-This is the only module where financial feature engineering occurs. Adding,
-removing, or changing features happens here and only here.
-
-Feature vector (F=3, fixed across all simulators):
-    [0]  log(S_t / K)       log-moneyness
-    [1]  T_mat - t_years_t  time to maturity τ
-    [2]  v_t                variance slot (real for Heston; 0.0 for BS/NGA)
-
-The output shape is (N, T, 3) — NOT (N, T+1, 3). The maturity step t=T is
-excluded because the agent takes no hedging action at maturity.
-
-Usage
------
-    from src.state.builder import build_features
-
-    features = build_features(batch)   # (N, T, 3), float32, CPU
+This module maps dataset tensors to the state tensor ``I_t`` used by the
+policy network, with features ``[log(S_t/K), tau_t, v_t]`` over hedging times
+``t = 0, ..., T-1``.
 """
 
 from __future__ import annotations
@@ -27,8 +11,7 @@ import torch
 
 from src.io.dataset_loader import DatasetBatch
 
-# Feature dimension — fixed for all simulators and all Aim 2/3 experiments.
-# The policy network input dim is FEATURE_DIM + 1 (for δ_{t-1}).
+# The policy input is FEATURE_DIM plus the previous hedge ratio delta_{t-1}.
 FEATURE_DIM = 3
 
 
@@ -40,9 +23,8 @@ def build_features(batch: DatasetBatch) -> torch.Tensor:
     features below — moneyness, time to maturity, and variance — fully
     characterise the state for BS, Heston, and NGA.
 
-    The previous hedge ratio δ_{t-1} is NOT included here. It is concatenated
-    by the policy network at Stage 5, keeping state construction decoupled
-    from network architecture.
+    The previous hedge ratio ``delta_{t-1}`` is intentionally excluded and
+    concatenated later by the policy network.
 
     Parameters
     ----------
@@ -65,26 +47,17 @@ def build_features(batch: DatasetBatch) -> torch.Tensor:
     """
     _validate_inputs(batch)
 
-    # Slice off the maturity step — shape goes from (N, T+1) → (N, T)
-    # Index :-1 keeps t=0 through t=T-1 (the T rebalancing steps).
-    S_t = batch.paths_S[:, :-1]   # (N, T)
-    v_t = batch.paths_v[:, :-1]   # (N, T)
-    t_t = batch.paths_t[:, :-1]   # (N, T)
+    # Exclude maturity because no hedge is placed at t = T.
+    S_t = batch.paths_S[:, :-1]
+    v_t = batch.paths_v[:, :-1]
+    t_t = batch.paths_t[:, :-1]
 
-    # Feature 0: log-moneyness  log(S_t / K)
-    # Positive → in-the-money (call), negative → out-of-the-money.
-    log_moneyness = torch.log(S_t / batch.K)          # (N, T)
+    log_moneyness = torch.log(S_t / batch.K)
 
-    # Feature 1: time to maturity  τ_t = T_mat - t
-    # Starts near T_mat at t=0, approaches 0 as t→T.
-    tau = batch.T_mat - t_t                            # (N, T)
+    tau = batch.T_mat - t_t
 
-    # Feature 2: variance slot
-    # Real variance process v_t for Heston; 0.0 everywhere for BS/NGA
-    # (already zero in batch.paths_v — no branching needed here).
-    v_slot = v_t                                       # (N, T)
+    v_slot = v_t
 
-    # Stack along new last dimension → (N, T, 3)
     features = torch.stack([log_moneyness, tau, v_slot], dim=-1)
 
     _validate_outputs(features, batch)
@@ -96,7 +69,18 @@ def build_features(batch: DatasetBatch) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 def _validate_inputs(batch: DatasetBatch) -> None:
-    """Fast pre-flight checks on the DatasetBatch before any computation."""
+    """Validate dataset tensors before feature construction.
+
+    Parameters
+    ----------
+    batch : DatasetBatch
+        Input batch expected to contain ``(N, T+1)`` float32 tensors.
+
+    Raises
+    ------
+    ValueError
+        If shapes, dtypes, or scalar metadata are invalid.
+    """
     expected_S_shape = (batch.n_paths, batch.n_steps + 1)
 
     if batch.paths_S.shape != expected_S_shape:
@@ -125,7 +109,20 @@ def _validate_inputs(batch: DatasetBatch) -> None:
 
 
 def _validate_outputs(features: torch.Tensor, batch: DatasetBatch) -> None:
-    """Post-computation shape and NaN checks."""
+    """Validate feature tensor shape and finite values.
+
+    Parameters
+    ----------
+    features : torch.Tensor
+        Constructed feature tensor with expected shape ``(N, T, 3)``.
+    batch : DatasetBatch
+        Source batch used to infer expected dimensions.
+
+    Raises
+    ------
+    ValueError
+        If shape mismatches occur or NaN values are present.
+    """
     expected = (batch.n_paths, batch.n_steps, FEATURE_DIM)
     if features.shape != expected:
         raise ValueError(

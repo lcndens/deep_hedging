@@ -1,27 +1,7 @@
-"""Proportional transaction costs — Stage 3 (Frictions).
+"""Proportional transaction-cost model for deep hedging.
 
-Computes the total transaction cost incurred along a hedging trajectory.
-Isolated so cost structures can be swapped cleanly per experiment.
-
-Cost formula (Buehler et al. 2019, eq. 2.2):
-    cost_t = epsilon * S_t * |delta_t - delta_{t-1}|
-    total_cost = sum over t=0..T-1
-
-Convention:
-    delta_{-1} = 0  (agent starts with no position before t=0)
-
-With epsilon=0.0 this returns a zero tensor — the frictionless baseline
-used for all Aim 2 experiments.
-
-Usage
------
-    from src.frictions.proportional import proportional_cost
-
-    total_cost = proportional_cost(
-        S_obs=batch.paths_S[:, :-1],   # (N, T)
-        deltas=deltas,                  # (N, T)
-        epsilon=0.0,
-    )   # → (N,)
+This module computes cumulative trading costs along hedging paths using
+``cost_t = epsilon * S_t * |delta_t - delta_{t-1}|`` with ``delta_{-1} = 0``.
 """
 
 from __future__ import annotations
@@ -38,19 +18,24 @@ def proportional_cost(
 
     Parameters
     ----------
-    S_obs : torch.Tensor, shape (N, T)
-        Spot prices at rebalancing steps t=0..T-1.
-        Typically ``batch.paths_S[:, :-1]``.
-    deltas : torch.Tensor, shape (N, T)
-        Hedge ratios output by the policy network.
+    S_obs : torch.Tensor
+        Spot prices with shape ``(N, T)``, where ``N`` is the number of paths
+        and ``T`` is the number of hedging timesteps.
+    deltas : torch.Tensor
+        Hedge ratios ``delta_t`` with shape ``(N, T)``.
     epsilon : float
         Proportional cost rate. 0.0 → frictionless (returns zero tensor).
         Typical values: 0.001 (10 bps), 0.01 (100 bps).
 
     Returns
     -------
-    total_cost : torch.Tensor, shape (N,), same dtype and device as S_obs.
-        Total transaction cost per path, summed over all T rebalancing steps.
+    torch.Tensor
+        Total transaction cost per path with shape ``(N,)``.
+
+    Notes
+    -----
+    A zero column is prepended conceptually so that ``delta_prev[:, 0] = 0``,
+    matching the convention that the initial inventory before trading is zero.
 
     Raises
     ------
@@ -62,15 +47,13 @@ def proportional_cost(
     if epsilon == 0.0:
         return torch.zeros(S_obs.shape[0], dtype=S_obs.dtype, device=S_obs.device)
 
-    # delta_{-1} = 0: prepend a column of zeros so delta_prev[:,0] = 0
-    # delta_prev[:,t] = delta_{t-1} for t=0..T-1
+    # This constructs delta_{t-1} for each hedging step with delta_{-1}=0.
     N = S_obs.shape[0]
     zeros = torch.zeros(N, 1, dtype=deltas.dtype, device=deltas.device)
     delta_prev = torch.cat([zeros, deltas[:, :-1]], dim=1)   # (N, T)
 
-    # cost_t = epsilon * S_t * |delta_t - delta_{t-1}|
-    cost_per_step = epsilon * S_obs * torch.abs(deltas - delta_prev)  # (N, T)
-    total_cost    = cost_per_step.sum(dim=1)                           # (N,)
+    cost_per_step = epsilon * S_obs * torch.abs(deltas - delta_prev)
+    total_cost = cost_per_step.sum(dim=1)
 
     return total_cost
 
@@ -84,6 +67,22 @@ def _validate_inputs(
     deltas: torch.Tensor,
     epsilon: float,
 ) -> None:
+    """Validate shapes and constraints for transaction-cost inputs.
+
+    Parameters
+    ----------
+    S_obs : torch.Tensor
+        Spot tensor expected to have shape ``(N, T)``.
+    deltas : torch.Tensor
+        Hedge-ratio tensor expected to have shape ``(N, T)``.
+    epsilon : float
+        Proportional transaction-cost rate.
+
+    Raises
+    ------
+    ValueError
+        If tensor ranks or shapes are invalid, or ``epsilon < 0``.
+    """
     if S_obs.ndim != 2:
         raise ValueError(
             f"S_obs must be 2-D (N, T), got shape {tuple(S_obs.shape)}."

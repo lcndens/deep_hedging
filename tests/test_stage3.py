@@ -1,11 +1,11 @@
-"""Tests for Stage 3: derivatives, frictions, and PnL computation.
+"""Tests for derivatives, frictions, and terminal PnL computations.
 
 All tests use analytically verifiable inputs so correctness can be checked
 exactly, not just by shape. No dataset fixtures needed for most tests —
 we construct controlled tensors directly.
 
-A small set of integration tests load a real DatasetBatch to verify the
-full Stage 1 → 2 → 3 chain produces sensible PnL distributions.
+A small set of integration tests load a real DatasetBatch to verify that the
+data-to-PnL pipeline produces sensible terminal distributions.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from src.generate_dataset import main as generate_dataset
 from tests.conftest import N_PATHS, N_STEPS, T1
 
 def _gen(tmp_path: Path, sim: str) -> Path:
+    """Helper for gen."""
     return generate_dataset([
         "--sim",            sim,
         "--n_paths",        str(N_PATHS),
@@ -38,6 +39,7 @@ def _gen(tmp_path: Path, sim: str) -> Path:
 
 @pytest.fixture(scope="session")
 def bs_batch(tmp_path_factory):
+    """Helper for bs batch."""
     run_dir = _gen(tmp_path_factory.mktemp("bs"), "bs")
     return load_dataset(run_dir, split="train")
 
@@ -48,6 +50,7 @@ def bs_batch(tmp_path_factory):
 
 class TestCallPayoff:
 
+    """Test cases for TestCallPayoff."""
     def test_itm_call(self):
         """In-the-money call: payoff = S_T - K."""
         S_T = torch.tensor([110.0, 120.0, 150.0])
@@ -76,31 +79,37 @@ class TestCallPayoff:
         assert (out >= 0).all()
 
     def test_call_shape(self):
+        """Assert call shape."""
         S_T = torch.rand(1000) * 200
         out = call_payoff(S_T, K=100.0)
         assert out.shape == (1000,)
 
     def test_call_dtype_preserved(self):
+        """Assert call dtype preserved."""
         S_T = torch.tensor([110.0], dtype=torch.float32)
         out = call_payoff(S_T, K=100.0)
         assert out.dtype == torch.float32
 
     def test_call_device_preserved(self):
+        """Assert call device preserved."""
         S_T = torch.tensor([110.0])
         out = call_payoff(S_T, K=100.0)
         assert out.device == S_T.device
 
     def test_call_invalid_K_raises(self):
+        """Assert call invalid K raises."""
         with pytest.raises(ValueError, match="K must be positive"):
             call_payoff(torch.tensor([110.0]), K=0.0)
 
     def test_call_wrong_shape_raises(self):
+        """Assert call wrong shape raises."""
         with pytest.raises(ValueError, match="1-D"):
             call_payoff(torch.ones(3, 3), K=100.0)
 
 
 class TestPutPayoff:
 
+    """Test cases for TestPutPayoff."""
     def test_itm_put(self):
         """In-the-money put: payoff = K - S_T."""
         S_T = torch.tensor([80.0, 90.0, 50.0])
@@ -116,16 +125,19 @@ class TestPutPayoff:
         assert torch.all(out == 0.0)
 
     def test_atm_put_is_zero(self):
+        """Assert atm put is zero."""
         S_T = torch.tensor([100.0, 100.0])
         out = put_payoff(S_T, K=100.0)
         assert torch.all(out == 0.0)
 
     def test_put_nonnegative(self):
+        """Assert put nonnegative."""
         S_T = torch.linspace(50.0, 200.0, 100)
         out = put_payoff(S_T, K=100.0)
         assert (out >= 0).all()
 
     def test_put_shape(self):
+        """Assert put shape."""
         S_T = torch.rand(500) * 200
         out = put_payoff(S_T, K=100.0)
         assert out.shape == (500,)
@@ -141,10 +153,12 @@ class TestPutPayoff:
         assert torch.allclose(diff, expected, atol=1e-5)
 
     def test_put_invalid_K_raises(self):
+        """Assert put invalid K raises."""
         with pytest.raises(ValueError, match="K must be positive"):
             put_payoff(torch.tensor([90.0]), K=-5.0)
 
     def test_put_wrong_shape_raises(self):
+        """Assert put wrong shape raises."""
         with pytest.raises(ValueError, match="1-D"):
             put_payoff(torch.ones(2, 5), K=100.0)
 
@@ -155,6 +169,7 @@ class TestPutPayoff:
 
 class TestProportionalCost:
 
+    """Test cases for TestProportionalCost."""
     def test_zero_epsilon_returns_zeros(self):
         """Frictionless case: epsilon=0 → all zeros regardless of deltas."""
         N, T = 50, 10
@@ -165,6 +180,7 @@ class TestProportionalCost:
         assert out.shape == (N,)
 
     def test_zero_epsilon_shape(self):
+        """Assert zero epsilon shape."""
         out = proportional_cost(torch.ones(30, 5), torch.ones(30, 5), epsilon=0.0)
         assert out.shape == (30,)
 
@@ -221,25 +237,30 @@ class TestProportionalCost:
         assert torch.allclose(cost2, 2 * cost1)
 
     def test_output_shape(self):
+        """Assert output shape."""
         N, T = 137, 30
         out  = proportional_cost(torch.ones(N, T), torch.ones(N, T), epsilon=0.01)
         assert out.shape == (N,)
 
     def test_dtype_preserved(self):
+        """Assert dtype preserved."""
         S   = torch.ones(5, 3, dtype=torch.float32)
         d   = torch.ones(5, 3, dtype=torch.float32)
         out = proportional_cost(S, d, epsilon=0.01)
         assert out.dtype == torch.float32
 
     def test_shape_mismatch_raises(self):
+        """Assert shape mismatch raises."""
         with pytest.raises(ValueError, match="shape"):
             proportional_cost(torch.ones(10, 5), torch.ones(10, 4), epsilon=0.01)
 
     def test_wrong_ndim_raises(self):
+        """Assert wrong ndim raises."""
         with pytest.raises(ValueError, match="2-D"):
             proportional_cost(torch.ones(10), torch.ones(10), epsilon=0.01)
 
     def test_negative_epsilon_raises(self):
+        """Assert negative epsilon raises."""
         with pytest.raises(ValueError, match="epsilon"):
             proportional_cost(torch.ones(5, 3), torch.ones(5, 3), epsilon=-0.01)
 
@@ -250,15 +271,9 @@ class TestProportionalCost:
 
 class TestComputePnL:
 
+    """Test cases for TestComputePnL."""
     def test_analytic_perfect_hedge(self):
-        """Perfect hedge: delta=1 everywhere, call payoff = max(S_T-K,0).
-
-        If S goes 100→110 in one step and we hold 1 share:
-            gains      = 1 * (110 - 100) = 10
-            cost       = 0  (frictionless)
-            payoff     = max(110 - 100, 0) = 10
-            pnl        = 0 + 10 - 0 - 10 = 0
-        """
+        """Assert a one-step perfect hedge yields zero terminal PnL."""
         paths_S    = torch.tensor([[100.0, 110.0]])   # (1, 2) → T=1
         deltas     = torch.tensor([[1.0]])             # (1, 1)
         payoff     = torch.tensor([10.0])              # (1,)
@@ -267,13 +282,7 @@ class TestComputePnL:
         assert torch.allclose(pnl, torch.tensor([0.0]))
 
     def test_analytic_unhedged(self):
-        """Unhedged short call: delta=0, S rises → large loss.
-
-            gains  = 0
-            cost   = 0
-            payoff = max(110-100, 0) = 10
-            pnl    = -10
-        """
+        """Assert an unhedged short call incurs the expected payoff loss."""
         paths_S    = torch.tensor([[100.0, 110.0]])
         deltas     = torch.tensor([[0.0]])
         payoff     = torch.tensor([10.0])
@@ -325,6 +334,7 @@ class TestComputePnL:
         assert torch.allclose(pnl_low - pnl_high, torch.tensor([5.0]))
 
     def test_output_shape(self):
+        """Assert output shape."""
         N, T = 137, 30
         pnl  = compute_pnl(
             paths_S    = torch.ones(N, T + 1),
@@ -335,6 +345,7 @@ class TestComputePnL:
         assert pnl.shape == (N,)
 
     def test_dtype_preserved(self):
+        """Assert dtype preserved."""
         pnl = compute_pnl(
             torch.ones(5, 4, dtype=torch.float32),
             torch.ones(5, 3, dtype=torch.float32),
@@ -363,10 +374,12 @@ class TestComputePnL:
     # --- Error handling ---
 
     def test_paths_S_wrong_ndim_raises(self):
+        """Assert paths S wrong ndim raises."""
         with pytest.raises(ValueError, match="2-D"):
             compute_pnl(torch.ones(10), torch.ones(10, 1), torch.zeros(10), torch.zeros(10))
 
     def test_deltas_wrong_ndim_raises(self):
+        """Assert deltas wrong ndim raises."""
         with pytest.raises(ValueError, match="2-D"):
             compute_pnl(torch.ones(5, 4), torch.ones(15), torch.zeros(5), torch.zeros(5))
 
@@ -381,6 +394,7 @@ class TestComputePnL:
             )
 
     def test_N_mismatch_raises(self):
+        """Assert N mismatch raises."""
         with pytest.raises(ValueError, match="N="):
             compute_pnl(
                 torch.ones(5, 4),
@@ -390,6 +404,7 @@ class TestComputePnL:
             )
 
     def test_payoff_wrong_shape_raises(self):
+        """Assert payoff wrong shape raises."""
         with pytest.raises(ValueError, match="payoff"):
             compute_pnl(
                 torch.ones(5, 4),
@@ -399,6 +414,7 @@ class TestComputePnL:
             )
 
     def test_total_cost_wrong_shape_raises(self):
+        """Assert total cost wrong shape raises."""
         with pytest.raises(ValueError, match="total_cost"):
             compute_pnl(
                 torch.ones(5, 4),
@@ -409,11 +425,12 @@ class TestComputePnL:
 
 
 # ===========================================================================
-# INTEGRATION — full Stage 1→3 chain
+# Integration tests for the full data-to-PnL path.
 # ===========================================================================
 
 class TestIntegration:
 
+    """Test cases for TestIntegration."""
     def test_frictionless_pnl_finite(self, bs_batch):
         """End-to-end with random deltas: PnL should be finite everywhere."""
         N = bs_batch.n_paths
@@ -447,12 +464,7 @@ class TestIntegration:
         )
 
     def test_delta_one_pnl_structure(self, bs_batch):
-        """Delta=1 everywhere: gains = S_T - S_0, payoff = max(S_T-K, 0).
-
-        PnL = (S_T - S_0) - max(S_T - K, 0)
-        For S_T > K: PnL = S_T - S_0 - (S_T - K) = K - S_0
-        For S_T ≤ K: PnL = S_T - S_0
-        """
+        """Assert delta=1 PnL equals cumulative gains minus terminal payoff."""
         N      = bs_batch.n_paths
         T      = bs_batch.n_steps
         S_0    = bs_batch.paths_S[:, 0]

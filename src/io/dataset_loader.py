@@ -1,26 +1,7 @@
-"""Dataset loader for deep hedging pipeline — Stage 1.
+"""Dataset loading utilities for pre-generated deep-hedging runs.
 
-Reads pre-generated Parquet datasets from disk and returns dense CPU tensors
-wrapped in a DatasetBatch dataclass. This is the only module that touches disk
-during a training run; it is called once at startup.
-
-Folder layout expected (schema v1.0):
-    <run_dir>/
-        metadata.json
-        contracts.parquet
-        observations/<split>/part-00000.parquet
-        latent_state/<split>/part-00000.parquet   (optional — zeros if absent)
-
-Usage
------
-    from src.io.dataset_loader import load_dataset, load_split_sizes
-
-    batch = load_dataset("data/datasets/v1.0/heston/<run_id>", split="train")
-    # batch.paths_S  : torch.Tensor  (N, T+1)
-    # batch.paths_v  : torch.Tensor  (N, T+1)
-    # batch.paths_t  : torch.Tensor  (N, T+1)
-    # batch.K        : float
-    # batch.T_mat    : float
+The loader reads canonical v1.0 parquet files, validates schema consistency,
+and returns dense CPU tensors required by feature construction and training.
 """
 
 from __future__ import annotations
@@ -43,19 +24,27 @@ from src.schema.v1_0 import OBS_SCHEMA, CONTRACTS_SCHEMA, LATENT_STATE_SCHEMA
 
 @dataclass(frozen=True)
 class DatasetBatch:
-    """All tensors and scalars for one split of a pre-generated dataset.
+    """Container for one dataset split in tensor form.
 
-    Attributes
+    Parameters
     ----------
-    paths_S : (N, T+1) float32 CPU tensor — spot prices at every timestep.
-    paths_v : (N, T+1) float32 CPU tensor — variance process (0.0 for BS/NGA
-              or when latent_state/ files are absent).
-    paths_t : (N, T+1) float32 CPU tensor — time in years at every timestep.
-    K       : strike price (Python float).
-    T_mat   : maturity in years (Python float).
-    n_paths : number of paths N in this split.
-    n_steps : number of rebalancing steps T (not T+1).
-    metadata: raw metadata.json dict, kept for logging and config validation.
+    paths_S : torch.Tensor
+        Spot tensor with shape ``(N, T+1)`` and dtype ``float32``.
+    paths_v : torch.Tensor
+        Variance tensor with shape ``(N, T+1)`` and dtype ``float32``.
+        For BS and NGA, this is identically zero.
+    paths_t : torch.Tensor
+        Time-grid tensor with shape ``(N, T+1)`` and dtype ``float32``.
+    K : float
+        Option strike price.
+    T_mat : float
+        Option maturity in years.
+    n_paths : int
+        Number of paths ``N`` in the split.
+    n_steps : int
+        Number of hedging timesteps ``T``.
+    metadata : dict
+        Parsed ``metadata.json`` content for logging and validation.
     """
 
     paths_S:  torch.Tensor
@@ -101,32 +90,32 @@ def load_dataset(run_dir: Path | str, split: str) -> DatasetBatch:
     _validate_split(split)
     _require_dir(run_dir)
 
-    # Step 1 — Load metadata and contracts
+    # Load metadata and contract scalars first to recover T and K.
     metadata = _load_metadata(run_dir)
     n_steps  = metadata["time_grid"]["n_steps"]
     T1       = n_steps + 1
     K, T_mat = _load_contract_scalars(run_dir)
 
-    # Step 2 — Read observations parquet
+    # Read long-format observations for the requested split.
     obs_path = run_dir / "observations" / split / "part-00000.parquet"
     _require_file(obs_path)
     obs = _read_parquet(obs_path, OBS_SCHEMA)
 
-    # Step 3 — Read latent state parquet (with fallback to zeros)
+    # Latent state is optional; fallback returns zeros when files are absent.
     lat_path = run_dir / "latent_state" / split / "part-00000.parquet"
     lat = _load_latent_state(lat_path, obs)
 
-    # Step 4 — Merge on (path_id, t_idx)
+    # Join variance column onto observations by path/time index.
     merged = obs.merge(
         lat[["path_id", "t_idx", "v"]],
         on=["path_id", "t_idx"],
         how="left",
     )
 
-    # Step 5 — Sort by (path_id, t_idx) — required for reshape correctness
+    # Sorting ensures each path is contiguous before reshape to (N, T+1).
     merged = merged.sort_values(["path_id", "t_idx"]).reset_index(drop=True)
 
-    # Step 6 — Validate row count
+    # Every path must contribute exactly T+1 rows.
     n_rows = len(merged)
     if n_rows % T1 != 0:
         raise ValueError(
@@ -135,15 +124,15 @@ def load_dataset(run_dir: Path | str, split: str) -> DatasetBatch:
         )
     N = n_rows // T1
 
-    # Step 7 — Pivot long → wide via numpy reshape (fast, zero intermediate copy)
+    # Pivot long tables to dense path matrices.
     S_arr = merged["S"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
     v_arr = merged["v"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
     t_arr = merged["t_years"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
 
-    # Step 8 — Sanity checks
+    # Validate basic numerical invariants before tensor conversion.
     _check_tensors(S_arr, v_arr, t_arr, T_mat, metadata, run_dir)
 
-    # Step 9 — Convert to tensors (torch.from_numpy shares memory — no copy)
+    # torch.from_numpy keeps data on CPU and avoids extra copies.
     return DatasetBatch(
         paths_S  = torch.from_numpy(S_arr),
         paths_v  = torch.from_numpy(v_arr),
@@ -172,7 +161,7 @@ def load_split_sizes(run_dir: Path | str) -> dict[str, int]:
     dict[str, int]
         e.g. ``{'train': 70000, 'val': 15000, 'test': 15000}``
     """
-    run_dir  = Path(run_dir)
+    run_dir = Path(run_dir)
     _require_dir(run_dir)
 
     metadata = _load_metadata(run_dir)
@@ -195,6 +184,18 @@ def load_split_sizes(run_dir: Path | str) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 def _validate_split(split: str) -> None:
+    """Validate split name against the canonical train/val/test set.
+
+    Parameters
+    ----------
+    split : str
+        Requested split name.
+
+    Raises
+    ------
+    ValueError
+        If ``split`` is not one of ``train``, ``val``, or ``test``.
+    """
     valid = {"train", "val", "test"}
     if split not in valid:
         raise ValueError(
@@ -203,6 +204,18 @@ def _validate_split(split: str) -> None:
 
 
 def _require_dir(path: Path) -> None:
+    """Require that a path exists and is a directory.
+
+    Parameters
+    ----------
+    path : Path
+        Directory path to validate.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the path does not exist or is not a directory.
+    """
     if not path.exists():
         raise FileNotFoundError(f"Run directory not found: '{path}'")
     if not path.is_dir():
@@ -210,18 +223,53 @@ def _require_dir(path: Path) -> None:
 
 
 def _require_file(path: Path) -> None:
+    """Require that a file path exists.
+
+    Parameters
+    ----------
+    path : Path
+        File path to validate.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the file does not exist.
+    """
     if not path.exists():
         raise FileNotFoundError(f"Required file not found: '{path}'")
 
 
 def _load_metadata(run_dir: Path) -> dict:
+    """Load and parse dataset metadata.
+
+    Parameters
+    ----------
+    run_dir : Path
+        Dataset run directory.
+
+    Returns
+    -------
+    dict
+        Parsed JSON metadata.
+    """
     meta_path = run_dir / "metadata.json"
     _require_file(meta_path)
     return json.loads(meta_path.read_text(encoding="utf-8"))
 
 
 def _load_contract_scalars(run_dir: Path) -> tuple[float, float]:
-    """Read strike K and maturity T_mat from contracts.parquet."""
+    """Load strike and maturity scalars from ``contracts.parquet``.
+
+    Parameters
+    ----------
+    run_dir : Path
+        Dataset run directory.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(K, T_mat)``.
+    """
     con_path = run_dir / "contracts.parquet"
     _require_file(con_path)
     df = _read_parquet(con_path, CONTRACTS_SCHEMA)
@@ -231,11 +279,24 @@ def _load_contract_scalars(run_dir: Path) -> tuple[float, float]:
 
 
 def _read_parquet(path: Path, schema) -> pd.DataFrame:
-    """Read a Parquet file and validate columns against an Arrow schema.
+    """Read a parquet table and validate schema columns.
 
-    Uses pyarrow for reading (consistent with how the writer writes) then
-    converts to pandas. Column validation raises a clear error rather than
-    a cryptic downstream KeyError.
+    Parameters
+    ----------
+    path : Path
+        Parquet file path.
+    schema : pyarrow.Schema
+        Expected Arrow schema.
+
+    Returns
+    -------
+    pd.DataFrame
+        Loaded table as a pandas dataframe.
+
+    Raises
+    ------
+    ValueError
+        If actual columns differ from the expected schema columns.
     """
     expected_cols = [f.name for f in schema]
     table = pq.read_table(path)
@@ -256,12 +317,24 @@ def _read_parquet(path: Path, schema) -> pd.DataFrame:
 
 
 def _load_latent_state(lat_path: Path, obs: pd.DataFrame) -> pd.DataFrame:
-    """Read latent state parquet, or construct a zero fallback if absent."""
+    """Load latent variance data or construct a zero fallback.
+
+    Parameters
+    ----------
+    lat_path : Path
+        Expected latent-state parquet file path.
+    obs : pd.DataFrame
+        Observations table used for path/time indices in fallback mode.
+
+    Returns
+    -------
+    pd.DataFrame
+        Latent-state table with columns ``path_id``, ``t_idx``, and ``v``.
+    """
     if lat_path.exists():
         return _read_parquet(lat_path, LATENT_STATE_SCHEMA)
 
-    # Fallback: zero variance — keeps loader functional before Week 1 is done
-    # and for BS/NGA datasets generated before the latent state schema existed.
+    # Zero fallback preserves the shared state layout across simulators.
     return pd.DataFrame({
         "path_id": obs["path_id"].to_numpy(),
         "t_idx":   obs["t_idx"].to_numpy(),
@@ -277,7 +350,33 @@ def _check_tensors(
     metadata: dict,
     run_dir: Path,
 ) -> None:
-    """Run sanity checks on the pivoted arrays before converting to tensors."""
+    """Run numerical sanity checks on reshaped path arrays.
+
+    Parameters
+    ----------
+    S_arr : np.ndarray
+        Spot matrix with shape ``(N, T+1)``.
+    v_arr : np.ndarray
+        Variance matrix with shape ``(N, T+1)``.
+    t_arr : np.ndarray
+        Time-grid matrix with shape ``(N, T+1)``.
+    T_mat : float
+        Maturity from the contracts table.
+    metadata : dict
+        Parsed metadata used for simulator-specific checks.
+    run_dir : Path
+        Dataset path used in error messages.
+
+    Raises
+    ------
+    ValueError
+        If time-grid constraints fail or NaNs are present.
+
+    Warns
+    -----
+    UserWarning
+        If a Heston dataset is loaded with all-zero variance values.
+    """
 
     # t=0 must be 0.0 for every path
     if not np.allclose(t_arr[:, 0], 0.0, atol=1e-6):
@@ -303,8 +402,7 @@ def _check_tensors(
                 f"after loading '{run_dir}'."
             )
 
-    # Heston-specific: warn if variance is all zeros
-    # (indicates latent_state/ files are missing and fallback was used)
+    # All-zero variance for Heston usually means latent-state files are absent.
     simulator = metadata.get("simulator", "")
     if simulator == "Heston" and np.allclose(v_arr, 0.0):
         warnings.warn(

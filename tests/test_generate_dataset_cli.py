@@ -1,3 +1,5 @@
+"""Tests for the generate dataset cli pipeline component."""
+
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -7,6 +9,7 @@ from src.generate_dataset import main as generate_dataset_main
 
 
 def _latest_run_dir(sim_root: Path) -> Path:
+    """Helper for latest run dir."""
     runs = sorted(sim_root.glob("*"))
     assert runs, f"No runs found under {sim_root}"
     return runs[-1]

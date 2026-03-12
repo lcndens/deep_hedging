@@ -1,3 +1,5 @@
+"""Tests for the plot observations pipeline component."""
+
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,7 @@ from src.plot_observations import main as plot_observations_main
 
 
 def _latest_run_dir(sim_root: Path) -> Path:
+    """Helper for latest run dir."""
     runs = sorted(sim_root.glob("*"))
     assert runs, f"No runs found under {sim_root}"
     return runs[-1]

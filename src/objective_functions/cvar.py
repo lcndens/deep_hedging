@@ -1,37 +1,8 @@
-"""CVaR objective function for deep hedging — Stage 4b.
+"""CVaR loss via optimized certainty equivalent for deep hedging.
 
-Implements the Conditional Value at Risk (CVaR) loss via the Optimized
-Certainty Equivalent (OCE) formulation (He et al. 2025, eq. 2.5):
-
-    L(θ, ω) = ω + mean( max(-PnL - ω, 0) ) / (1 - α)
-
-where:
-    α     = confidence level (default 0.95 → penalise worst 5% of paths)
-    ω     = trainable scalar that converges to VaR_α at optimum
-    -PnL  = loss per path (positive = bad outcome)
-
-ω is an nn.Parameter optimised jointly with network weights in the same
-Adam step. At convergence ω ≈ VaR_α(loss distribution).
-
-The clamp focuses gradients only on paths where the hedge failed badly
-(loss exceeded ω). Well-hedged paths contribute zero gradient.
-
-Special cases:
-    α = 0.0  →  reduces to mean(-PnL)  (risk-neutral)
-    α → 1.0  →  approaches worst-case loss
-
-Usage
------
-    from src.objective_functions.cvar import CVaRLoss
-
-    cvar      = CVaRLoss(alpha=0.95)
-    optimizer = torch.optim.Adam(
-        [*network.parameters(), cvar.omega], lr=1e-3
-    )
-
-    loss = cvar(pnl)      # scalar
-    loss.backward()
-    optimizer.step()
+The loss follows He et al. (2025, eq. 2.5):
+``L(theta, omega) = omega + E[max(-PnL - omega, 0)] / (1 - alpha)``,
+where ``omega`` is a trainable scalar converging to ``VaR_alpha``.
 """
 
 from __future__ import annotations
@@ -51,6 +22,18 @@ class CVaRLoss(nn.Module):
     """
 
     def __init__(self, alpha: float = 0.95) -> None:
+        """Initialize the CVaR objective module.
+
+        Parameters
+        ----------
+        alpha : float, default=0.95
+            CVaR confidence level in ``[0, 1)``.
+
+        Raises
+        ------
+        ValueError
+            If ``alpha`` is outside ``[0, 1)``.
+        """
         super().__init__()
 
         if not 0.0 <= alpha < 1.0:
@@ -68,15 +51,19 @@ class CVaRLoss(nn.Module):
 
         Parameters
         ----------
-        pnl : torch.Tensor, shape (N,)
-            Terminal PnL per path. Output of ``compute_pnl()``.
-            Positive = profit, negative = loss.
+        pnl : torch.Tensor
+            Terminal PnL with shape ``(N,)``, where ``N`` is the number of
+            simulated paths.
 
         Returns
         -------
-        loss : torch.Tensor, scalar
-            Differentiable CVaR estimate. Call ``loss.backward()`` to
-            compute gradients for both network weights and ``self.omega``.
+        torch.Tensor
+            Scalar differentiable CVaR loss.
+
+        Raises
+        ------
+        ValueError
+            If ``pnl`` is not a valid one-dimensional finite tensor.
         """
         _validate_pnl(pnl)
 
@@ -96,7 +83,8 @@ class CVaRLoss(nn.Module):
 
         Parameters
         ----------
-        pnl : torch.Tensor, shape (N,)
+        pnl : torch.Tensor
+            Terminal PnL vector with shape ``(N,)``.
 
         Returns
         -------
@@ -114,10 +102,18 @@ class CVaRLoss(nn.Module):
         Returns
         -------
         float
+            Current value of the trainable scalar ``omega``.
         """
         return self.omega.item()
 
     def extra_repr(self) -> str:
+        """Return module representation metadata.
+
+        Returns
+        -------
+        str
+            Text representation containing the configured ``alpha`` value.
+        """
         return f"alpha={self.alpha}"
 
 
@@ -126,6 +122,18 @@ class CVaRLoss(nn.Module):
 # ---------------------------------------------------------------------------
 
 def _validate_pnl(pnl: torch.Tensor) -> None:
+    """Validate PnL tensor before CVaR computation.
+
+    Parameters
+    ----------
+    pnl : torch.Tensor
+        PnL tensor expected to have shape ``(N,)`` and finite values.
+
+    Raises
+    ------
+    ValueError
+        If rank is wrong, tensor is empty, or values contain NaNs.
+    """
     if pnl.ndim != 1:
         raise ValueError(
             f"pnl must be a 1-D tensor of shape (N,), got shape {tuple(pnl.shape)}."

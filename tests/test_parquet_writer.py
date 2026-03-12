@@ -1,3 +1,5 @@
+"""Tests for the parquet writer pipeline component."""
+
 from pathlib import Path
 
 import pandas as pd

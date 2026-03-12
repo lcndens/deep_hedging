@@ -1,59 +1,51 @@
-# Python cache / bytecode
+# =============================================================================
+# Deep Hedging — .gitignore
+# =============================================================================
+
+# --- Data & Results (too large for git) --------------------------------------
+data/
+results/
+
+# --- SLURM logs --------------------------------------------------------------
+logs/
+
+# --- Scripts (SLURM job files) -----------------------------------------------
+scripts/
+
+# --- Python ------------------------------------------------------------------
 __pycache__/
 *.py[cod]
-*$py.class
-
-# Virtual environments
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
 .venv/
 venv/
 env/
-ENV/
 
-# Tool caches
+# --- Pytest ------------------------------------------------------------------
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.hypothesis/
 .coverage
-.coverage.*
 htmlcov/
 
-# Jupyter
+# --- Jupyter -----------------------------------------------------------------
 .ipynb_checkpoints/
+*.ipynb
 
-# Build and packaging
-build/
-dist/
-*.egg-info/
-.eggs/
+# --- Environment & secrets ---------------------------------------------------
+.env
+*.env
 
-# IDE/editor
+# --- OS ----------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+
+# --- IDE ---------------------------------------------------------------------
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Logs and temp files
-*.log
-*.tmp
-*.bak
-
-# Data artifacts (keep docs, ignore generated datasets)
-data/datasets/
-
-# Model / training outputs
-checkpoints/
-outputs/
-artifacts/
-runs/
-wandb/
-
-# Secrets / local env
-.env
-.env.*
-*.key
-*.pem

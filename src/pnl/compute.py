@@ -1,33 +1,8 @@
-"""PnL computation — Stage 3 (PnL).
+"""Terminal PnL computation for deep hedging trajectories.
 
-Computes terminal profit and loss for each simulated hedging path.
-Pure tensor arithmetic — no trainable parameters.
-
-Formula (Buehler et al. 2019, eq. 2.1):
-    PnL_i = p0
-           + sum_{t=0}^{T-1} delta_t * (S_{t+1} - S_t)   [trading gains]
-           - total_cost                                     [transaction costs]
-           - payoff(S_T)                                    [option liability]
-
-p0 is fixed at 0.0 during training. By the cash-invariance of CVaR, p0
-shifts all PnL by a constant and does not affect the optimal hedge.
-
-Shape verification:
-    paths_S[:, 1:]   prices at t=1..T     (N, T)
-    paths_S[:, :-1]  prices at t=0..T-1   (N, T)
-    difference       S_{t+1} - S_t        (N, T)  ← aligns with deltas (N, T) ✓
-
-Usage
------
-    from src.pnl.compute import compute_pnl
-
-    pnl = compute_pnl(
-        paths_S=batch.paths_S,   # (N, T+1)
-        deltas=deltas,            # (N, T)
-        payoff=payoff,            # (N,)
-        total_cost=total_cost,    # (N,)
-        p0=0.0,
-    )   # → (N,)
+This module implements the per-path terminal profit-and-loss identity used by
+the training objective, consistent with Buehler et al. (2019, eq. 2.1):
+``PnL_i = p0 + sum_t delta_t (S_{t+1} - S_t) - C_T - payoff(S_T)``.
 """
 
 from __future__ import annotations
@@ -42,27 +17,37 @@ def compute_pnl(
     total_cost: torch.Tensor,
     p0: float = 0.0,
 ) -> torch.Tensor:
-    """Compute terminal PnL per path.
+    """Compute terminal PnL for each simulated path.
+
+    The function combines trading gains, cumulative transaction costs, and
+    terminal option liability into a single ``PnL`` tensor used by CVaR
+    optimisation.
 
     Parameters
     ----------
-    paths_S : torch.Tensor, shape (N, T+1)
-        Full spot price paths including the maturity step.
-        Typically ``batch.paths_S``.
-    deltas : torch.Tensor, shape (N, T)
-        Hedge ratios output by the policy network.
+    paths_S : torch.Tensor
+        Spot-price paths with shape ``(N, T+1)``, where ``N`` is the number of
+        simulated paths and ``T`` is the number of hedging timesteps.
+    deltas : torch.Tensor
+        Hedge ratios ``delta_t`` with shape ``(N, T)``.
     payoff : torch.Tensor, shape (N,)
-        Option payoff at maturity. Output of ``call_payoff`` or ``put_payoff``.
+        Terminal option payoff ``payoff(S_T)`` per path.
     total_cost : torch.Tensor, shape (N,)
-        Total transaction costs. Output of ``proportional_cost``.
+        Cumulative transaction costs ``C_T`` per path.
     p0 : float, optional
-        Initial option premium received. Fixed at 0.0 during training
-        by cash-invariance of CVaR. Default: 0.0.
+        Initial premium term in the PnL identity. During training this is
+        typically fixed at ``0.0`` by cash-invariance of CVaR.
 
     Returns
     -------
-    pnl : torch.Tensor, shape (N,), same dtype and device as paths_S.
-        Terminal PnL per path. Positive = profit, negative = loss.
+    torch.Tensor
+        Terminal PnL tensor with shape ``(N,)`` on the same device as
+        ``paths_S``.
+
+    Notes
+    -----
+    The increment term uses ``paths_S[:, 1:] - paths_S[:, :-1]`` so price
+    changes are aligned with ``deltas[:, t]`` for ``t = 0, ..., T-1``.
 
     Raises
     ------
@@ -71,13 +56,11 @@ def compute_pnl(
     """
     _validate_inputs(paths_S, deltas, payoff, total_cost)
 
-    # Trading gains: sum_t delta_t * (S_{t+1} - S_t)
-    # paths_S[:,1:]  → S_{t+1} for t=0..T-1   shape (N, T)
-    # paths_S[:,:-1] → S_t     for t=0..T-1   shape (N, T)
-    price_increments = paths_S[:, 1:] - paths_S[:, :-1]          # (N, T)
-    gains            = (deltas * price_increments).sum(dim=1)     # (N,)
+    # Aligns delta_t with the corresponding price increment S_{t+1} - S_t.
+    price_increments = paths_S[:, 1:] - paths_S[:, :-1]
+    gains = (deltas * price_increments).sum(dim=1)
 
-    pnl = p0 + gains - total_cost - payoff                        # (N,)
+    pnl = p0 + gains - total_cost - payoff
     return pnl
 
 
@@ -91,6 +74,24 @@ def _validate_inputs(
     payoff: torch.Tensor,
     total_cost: torch.Tensor,
 ) -> None:
+    """Validate tensor ranks and shape consistency for PnL inputs.
+
+    Parameters
+    ----------
+    paths_S : torch.Tensor
+        Spot paths with expected shape ``(N, T+1)``.
+    deltas : torch.Tensor
+        Hedge ratios with expected shape ``(N, T)``.
+    payoff : torch.Tensor
+        Terminal payoff vector with expected shape ``(N,)``.
+    total_cost : torch.Tensor
+        Transaction-cost vector with expected shape ``(N,)``.
+
+    Raises
+    ------
+    ValueError
+        If any tensor has an incompatible rank or shape.
+    """
     if paths_S.ndim != 2:
         raise ValueError(
             f"paths_S must be 2-D (N, T+1), got shape {tuple(paths_S.shape)}."
@@ -100,9 +101,9 @@ def _validate_inputs(
             f"deltas must be 2-D (N, T), got shape {tuple(deltas.shape)}."
         )
 
-    N      = paths_S.shape[0]
+    N = paths_S.shape[0]
     T_plus = paths_S.shape[1]
-    T      = deltas.shape[1]
+    T = deltas.shape[1]
 
     if T_plus != T + 1:
         raise ValueError(

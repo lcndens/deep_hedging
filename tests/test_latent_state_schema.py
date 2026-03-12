@@ -1,3 +1,5 @@
+"""Tests for the latent state schema pipeline component."""
+
 from __future__ import annotations
 
 import subprocess
@@ -15,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _run_generate(sim: str, out_root: Path, run_id: str, n_paths: int = 50, n_steps: int = 5) -> Path:
+    """Helper for run generate."""
     subprocess.run(
         [
             sys.executable,
@@ -41,6 +44,7 @@ def _run_generate(sim: str, out_root: Path, run_id: str, n_paths: int = 50, n_st
 
 @pytest.mark.parametrize("sim", ["bs", "heston", "nga"])
 def test_latent_state_layout_schema_and_alignment(sim: str, tmp_path: Path) -> None:
+    """Assert latent state layout schema and alignment."""
     out_root = tmp_path / "datasets" / "v1.0"
     run_dir = _run_generate(sim=sim, out_root=out_root, run_id=f"latent-schema-{sim}")
 

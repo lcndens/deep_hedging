@@ -1,4 +1,9 @@
-"""Black-Scholes simulator for observable-only price paths."""
+"""Black-Scholes path simulation for dataset generation.
+
+This module generates spot trajectories under geometric Brownian motion (GBM)
+for the deep-hedging pipeline and emits observations in long-table format plus
+a zero-valued latent variance placeholder.
+"""
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -10,7 +15,23 @@ import pandas as pd
 class BSParams:
     """Configuration for Black-Scholes path generation.
 
-    Attributes define market parameters, the time grid, and simulation size.
+    Parameters
+    ----------
+    s0 : float, default=100.0
+        Initial spot price ``S_0``.
+    sigma : float, default=0.2
+        Volatility parameter in ``dS_t = m S_t dt + sigma S_t dW_t``.
+    m : float, default=0.0
+        Drift parameter in the GBM dynamics.
+    maturity_years : float, default=1.0
+        Contract maturity ``T_mat`` in years.
+    n_steps : int, default=30
+        Number of hedging timesteps ``T``. The simulated path has ``T+1``
+        points including ``t=0`` and maturity.
+    n_paths : int, default=100_000
+        Number of Monte Carlo paths ``N``.
+    seed : int, default=42
+        Random seed for reproducible simulation.
     """
 
     # Defaults locked by your decision
@@ -26,17 +47,31 @@ class BSParams:
 
 
 def simulate_observations(cfg: BSParams) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Simulate GBM paths under Black–Scholes:
-        dS_t = m S_t dt + sigma S_t dW_t
+    """Simulate Black-Scholes spot paths and format canonical output tables.
 
-    Returns a pair of long-format DataFrames:
-        observations:
-        path_id (int64), t_idx (int32), t_years (float32), S (float32)
-        latent state:
-        path_id (int64), t_idx (int32), v (float32, zero placeholder)
+    Parameters
+    ----------
+    cfg : BSParams
+        Black-Scholes simulation settings.
 
-    Note: No 'split' column is ever created.
+    Returns
+    -------
+    tuple[pd.DataFrame, pd.DataFrame]
+        Two long-format tables:
+        ``observations`` with columns ``path_id, t_idx, t_years, S`` and
+        ``latent_state`` with columns ``path_id, t_idx, v``.
+
+    Notes
+    -----
+    The simulation uses exact log-space discretization:
+    ``log S_{t+1} = log S_t + (m - 0.5 sigma^2) dt + sigma sqrt(dt) Z_t``.
+    For Black-Scholes, latent variance is stored as zeros to keep a shared
+    schema with Heston datasets.
+
+    Raises
+    ------
+    ValueError
+        If configuration values violate positivity or range constraints.
     """
     if cfg.n_steps <= 0:
         raise ValueError("n_steps must be positive")
@@ -54,7 +89,7 @@ def simulate_observations(cfg: BSParams) -> tuple[pd.DataFrame, pd.DataFrame]:
     dt = cfg.maturity_years / cfg.n_steps
     t_grid = np.linspace(0.0, cfg.maturity_years, cfg.n_steps + 1, dtype=np.float64)
 
-    # Exact GBM discretization in log space
+    # Exact log-Euler update avoids positivity violations for S_t.
     z = rng.standard_normal(size=(cfg.n_paths, cfg.n_steps), dtype=np.float64)
     incr = (cfg.m - 0.5 * cfg.sigma**2) * dt + cfg.sigma * np.sqrt(dt) * z
 
@@ -65,7 +100,7 @@ def simulate_observations(cfg: BSParams) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     S = np.exp(logS).astype(np.float32)
 
-    # Long format
+    # Flatten to canonical long format expected by downstream parquet writer.
     path_id = np.repeat(np.arange(cfg.n_paths, dtype=np.int64), cfg.n_steps + 1)
     t_idx = np.tile(np.arange(cfg.n_steps + 1, dtype=np.int32), cfg.n_paths)
     t_years = np.tile(t_grid.astype(np.float32), cfg.n_paths)
@@ -75,7 +110,7 @@ def simulate_observations(cfg: BSParams) -> tuple[pd.DataFrame, pd.DataFrame]:
         {"path_id": path_id, "t_idx": t_idx, "t_years": t_years, "S": S_long}
     )
 
-    # Explicit dtype enforcement (keeps everything consistent)
+    # Enforce Arrow-compatible dtypes before serialization.
     df["path_id"] = df["path_id"].astype("int64")
     df["t_idx"] = df["t_idx"].astype("int32")
     df["t_years"] = df["t_years"].astype("float32")

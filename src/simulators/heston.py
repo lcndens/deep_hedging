@@ -1,4 +1,8 @@
-"""Heston simulator for observable-only price paths."""
+"""Heston path simulation with latent variance output.
+
+This module simulates coupled spot and variance dynamics for the deep-hedging
+dataset pipeline and returns canonical observations plus latent-state tables.
+"""
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -10,8 +14,30 @@ import pandas as pd
 class HestonParams:
     """Configuration for Heston path generation.
 
-    Includes spot process settings, variance process settings, and simulation
-    size/time-grid controls.
+    Parameters
+    ----------
+    s0 : float, default=100.0
+        Initial spot price ``S_0``.
+    m : float, default=0.0
+        Spot drift parameter in ``dS_t = m S_t dt + sqrt(v_t) S_t dW_t^S``.
+    v0 : float, default=0.04
+        Initial variance level ``v_0``.
+    kappa : float, default=1.5
+        Mean-reversion speed in the variance process.
+    theta : float, default=0.04
+        Long-run variance level.
+    xi : float, default=0.3
+        Volatility-of-volatility coefficient.
+    rho : float, default=-0.7
+        Correlation between spot and variance Brownian motions.
+    maturity_years : float, default=1.0
+        Contract maturity ``T_mat`` in years.
+    n_steps : int, default=30
+        Number of hedging timesteps ``T``. Paths contain ``T+1`` points.
+    n_paths : int, default=100_000
+        Number of Monte Carlo paths ``N``.
+    seed : int, default=42
+        Random seed.
     """
 
     # Market / spot
@@ -35,18 +61,30 @@ class HestonParams:
 
 
 def simulate_observations(cfg: HestonParams) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Full truncation Euler Heston simulation:
-      dS_t = m S_t dt + sqrt(v_t) S_t dW^S_t
-      dv_t = kappa(theta - v_t) dt + xi sqrt(v_t) dW^v_t
-      corr(dW^S, dW^v) = rho
+    """Simulate Heston spot/variance paths and return canonical tables.
 
-    We clamp variance in the diffusion and drift using v_pos = max(v, 0).
-    Returns:
-      observations:
-        path_id (int64), t_idx (int32), t_years (float32), S (float32)
-      latent state:
-        path_id (int64), t_idx (int32), v (float32)
+    Parameters
+    ----------
+    cfg : HestonParams
+        Heston simulation configuration.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, pd.DataFrame]
+        Two long-format tables:
+        ``observations`` with ``path_id, t_idx, t_years, S`` and
+        ``latent_state`` with ``path_id, t_idx, v``.
+
+    Notes
+    -----
+    The implementation uses full-truncation Euler for variance updates and
+    log-Euler for spot updates. The positive part ``v_t^+ = max(v_t, 0)`` is
+    used in drift and diffusion terms to stabilize discretization.
+
+    Raises
+    ------
+    ValueError
+        If configuration values are out of supported ranges.
     """
     if cfg.n_steps <= 0:
         raise ValueError("n_steps must be positive")
@@ -67,37 +105,38 @@ def simulate_observations(cfg: HestonParams) -> tuple[pd.DataFrame, pd.DataFrame
     sqrt_dt = np.sqrt(dt)
     t_grid = np.linspace(0.0, cfg.maturity_years, cfg.n_steps + 1, dtype=np.float64)
 
-    # Correlated normals
+    # Build correlated shocks with corr(dW^S, dW^v) = rho.
     z1 = rng.standard_normal(size=(cfg.n_paths, cfg.n_steps), dtype=np.float64)
     z2 = rng.standard_normal(size=(cfg.n_paths, cfg.n_steps), dtype=np.float64)
     dW_s = z1
     dW_v = cfg.rho * z1 + np.sqrt(max(0.0, 1.0 - cfg.rho**2)) * z2
 
-    # Allocate
+    # Allocate full path tensors including t=0.
     S = np.empty((cfg.n_paths, cfg.n_steps + 1), dtype=np.float64)
     v = np.empty((cfg.n_paths, cfg.n_steps + 1), dtype=np.float64)
     S[:, 0] = cfg.s0
     v[:, 0] = cfg.v0
 
-    # Simulate
+    # Step forward across T hedging intervals.
     for t in range(cfg.n_steps):
         v_pos = np.maximum(v[:, t], 0.0)
 
-        # Variance: full truncation Euler
+        # Full truncation keeps sqrt(v_t) well-defined in the update.
         v_next = (
             v[:, t]
             + cfg.kappa * (cfg.theta - v_pos) * dt
             + cfg.xi * np.sqrt(v_pos) * sqrt_dt * dW_v[:, t]
         )
-        v[:, t + 1] = v_next  # can go negative; truncation happens via v_pos next step
+        # v can be negative between steps; next update uses v_pos again.
+        v[:, t + 1] = v_next
 
-        # Spot: log-Euler using v_pos (keeps S positive)
+        # Log-Euler update preserves positivity of S_t.
         vol = np.sqrt(v_pos)
         S[:, t + 1] = S[:, t] * np.exp(
             (cfg.m - 0.5 * v_pos) * dt + vol * sqrt_dt * dW_s[:, t]
         )
 
-    # Convert to long format
+    # Flatten to canonical long format for parquet serialization.
     path_id = np.repeat(np.arange(cfg.n_paths, dtype=np.int64), cfg.n_steps + 1)
     t_idx = np.tile(np.arange(cfg.n_steps + 1, dtype=np.int32), cfg.n_paths)
     t_years = np.tile(t_grid.astype(np.float32), cfg.n_paths)
@@ -105,7 +144,7 @@ def simulate_observations(cfg: HestonParams) -> tuple[pd.DataFrame, pd.DataFrame
 
     df = pd.DataFrame({"path_id": path_id, "t_idx": t_idx, "t_years": t_years, "S": S_long})
 
-    # Enforce dtypes explicitly
+    # Enforce Arrow-compatible dtypes before writing.
     df["path_id"] = df["path_id"].astype("int64")
     df["t_idx"] = df["t_idx"].astype("int32")
     df["t_years"] = df["t_years"].astype("float32")

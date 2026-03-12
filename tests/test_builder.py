@@ -1,4 +1,4 @@
-"""Tests for src/state/builder.py — Stage 2.
+"""Tests for the state-feature builder module.
 
 Reuses the session-scoped dataset fixtures from test_dataset_loader.py by
 importing them directly. All tests operate on the train split.
@@ -25,9 +25,11 @@ from tests.conftest import N_PATHS, N_STEPS, T1
 # ---------------------------------------------------------------------------
 
 class TestShapeAndDtype:
+    """Test cases for TestShapeAndDtype."""
 
     @pytest.mark.parametrize("batch_fixture", ["bs_batch", "heston_batch", "nga_batch"])
     def test_shape(self, batch_fixture, request):
+        """Assert shape."""
         batch = request.getfixturevalue(batch_fixture)
         features = build_features(batch)
         expected = (batch.n_paths, N_STEPS, FEATURE_DIM)
@@ -37,12 +39,14 @@ class TestShapeAndDtype:
 
     @pytest.mark.parametrize("batch_fixture", ["bs_batch", "heston_batch", "nga_batch"])
     def test_dtype_float32(self, batch_fixture, request):
+        """Assert dtype float32."""
         batch = request.getfixturevalue(batch_fixture)
         features = build_features(batch)
         assert features.dtype == torch.float32
 
     @pytest.mark.parametrize("batch_fixture", ["bs_batch", "heston_batch", "nga_batch"])
     def test_device_cpu(self, batch_fixture, request):
+        """Assert device cpu."""
         batch = request.getfixturevalue(batch_fixture)
         features = build_features(batch)
         assert features.device.type == "cpu"
@@ -63,12 +67,14 @@ class TestShapeAndDtype:
 
     @pytest.mark.parametrize("batch_fixture", ["bs_batch", "heston_batch", "nga_batch"])
     def test_no_nans(self, batch_fixture, request):
+        """Assert no nans."""
         batch = request.getfixturevalue(batch_fixture)
         features = build_features(batch)
         assert not torch.isnan(features).any(), "NaN values found in features tensor"
 
     @pytest.mark.parametrize("batch_fixture", ["bs_batch", "heston_batch", "nga_batch"])
     def test_no_infs(self, batch_fixture, request):
+        """Assert no infs."""
         batch = request.getfixturevalue(batch_fixture)
         features = build_features(batch)
         assert not torch.isinf(features).any(), "Inf values found in features tensor"
@@ -80,6 +86,7 @@ class TestShapeAndDtype:
 
 class TestLogMoneyness:
 
+    """Test cases for TestLogMoneyness."""
     def test_slot_index(self, bs_batch):
         """Log-moneyness is feature index 0."""
         features = build_features(bs_batch)
@@ -125,6 +132,7 @@ class TestLogMoneyness:
 
 class TestTimeToMaturity:
 
+    """Test cases for TestTimeToMaturity."""
     def test_slot_index(self, bs_batch):
         """Time to maturity is feature index 1."""
         features = build_features(bs_batch)
@@ -185,6 +193,7 @@ class TestTimeToMaturity:
 
 class TestVarianceSlot:
 
+    """Test cases for TestVarianceSlot."""
     def test_slot_index(self, heston_batch):
         """Variance is feature index 2."""
         features = build_features(heston_batch)
@@ -232,6 +241,7 @@ class TestVarianceSlot:
 
 class TestErrors:
 
+    """Test cases for TestErrors."""
     def test_invalid_K_raises(self, bs_batch):
         """Zero strike should raise ValueError."""
         import dataclasses
@@ -240,12 +250,14 @@ class TestErrors:
             build_features(bad_batch)
 
     def test_negative_K_raises(self, bs_batch):
+        """Assert negative K raises."""
         import dataclasses
         bad_batch = dataclasses.replace(bs_batch, K=-1.0)
         with pytest.raises(ValueError, match="K must be positive"):
             build_features(bad_batch)
 
     def test_invalid_T_mat_raises(self, bs_batch):
+        """Assert invalid T mat raises."""
         import dataclasses
         bad_batch = dataclasses.replace(bs_batch, T_mat=0.0)
         with pytest.raises(ValueError, match="T_mat must be positive"):

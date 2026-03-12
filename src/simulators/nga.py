@@ -1,4 +1,9 @@
-"""NGA simulator for observable-only price paths."""
+"""NGA path simulation for robust deep hedging datasets.
+
+This module generates trajectories from a nonlinear generalized affine process
+with per-step parameter resampling and returns canonical observations plus a
+zero-valued latent variance placeholder.
+"""
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -8,15 +13,37 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class NGAParams:
-    """
-    Nonlinear generalized affine (NGA) simulator used in Robust Deep Hedging.
+    """Configuration for nonlinear generalized affine path simulation.
 
-    SDE form (conceptually):
-        dX_t = (b0 + b1 X_t) dt + (a0 + a1 X_t^+)^gamma dW_t
+    Parameters
+    ----------
+    x0 : float, default=100.0
+        Initial process value.
+    a0_min, a0_max : float
+        Bounds for ``a0`` sampled each timestep.
+    a1_min, a1_max : float
+        Bounds for ``a1`` sampled each timestep.
+    b0_min, b0_max : float
+        Bounds for ``b0`` sampled each timestep.
+    b1_min, b1_max : float
+        Bounds for ``b1`` sampled each timestep.
+    gamma_min, gamma_max : float
+        Bounds for exponent ``gamma`` sampled each timestep.
+    maturity_years : float, default=1.0
+        Contract maturity ``T_mat`` in years.
+    n_steps : int, default=30
+        Number of hedging timesteps ``T``; paths include ``T+1`` points.
+    n_paths : int, default=100_000
+        Number of Monte Carlo paths ``N``.
+    seed : int, default=42
+        Random seed.
 
-    Discretization:
-        Euler–Maruyama with parameters (b0,b1,a0,a1,gamma) resampled
-        uniformly from intervals at EACH time step (robust training setting).
+    Notes
+    -----
+    The process follows
+    ``dX_t = (b0 + b1 X_t) dt + (a0 + a1 X_t^+)^gamma dW_t``
+    with parameters sampled uniformly from the configured intervals at each
+    timestep, matching the robust setting in He et al. (2025).
     """
     # Initial state
     x0: float = 100.0
@@ -43,13 +70,47 @@ class NGAParams:
 
 
 def _check_interval(lo: float, hi: float, name: str) -> None:
-    """Validate inclusive interval bounds used for per-step parameter sampling."""
+    """Validate interval bounds used for parameter resampling.
+
+    Parameters
+    ----------
+    lo : float
+        Lower bound.
+    hi : float
+        Upper bound.
+    name : str
+        Parameter name for error reporting.
+
+    Raises
+    ------
+    ValueError
+        If ``hi < lo``.
+    """
     if hi < lo:
         raise ValueError(f"{name}: max < min ({hi} < {lo})")
 
 
 def simulate_observations(cfg: NGAParams) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Simulate NGA paths and return observations plus latent-state placeholders."""
+    """Simulate NGA paths and return canonical observation tables.
+
+    Parameters
+    ----------
+    cfg : NGAParams
+        NGA simulation configuration.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, pd.DataFrame]
+        Two long-format tables:
+        ``observations`` with ``path_id, t_idx, t_years, S`` (where ``S`` stores
+        the simulated ``X_t`` values) and ``latent_state`` with ``path_id, t_idx,
+        v`` set to zero.
+
+    Raises
+    ------
+    ValueError
+        If configuration values are invalid.
+    """
     if cfg.n_steps <= 0:
         raise ValueError("n_steps must be positive")
     if cfg.n_paths <= 0:
@@ -71,15 +132,15 @@ def simulate_observations(cfg: NGAParams) -> tuple[pd.DataFrame, pd.DataFrame]:
     sqrt_dt = np.sqrt(dt)
     t_grid = np.linspace(0.0, cfg.maturity_years, cfg.n_steps + 1, dtype=np.float64)
 
-    # Allocate X paths
+    # Allocate all paths including t=0 and maturity.
     X = np.empty((cfg.n_paths, cfg.n_steps + 1), dtype=np.float64)
     X[:, 0] = cfg.x0
 
-    # Pre-draw Brownian normals (faster than drawing in-loop)
+    # Pre-sampling shocks avoids repeated RNG overhead inside the loop.
     Z = rng.standard_normal(size=(cfg.n_paths, cfg.n_steps), dtype=np.float64)
 
     for i in range(cfg.n_steps):
-        # Sample parameters uniformly from bounds EACH time step (Remark 3.2)
+        # Robust setting: resample coefficients at every timestep.
         a0 = rng.uniform(cfg.a0_min, cfg.a0_max, size=cfg.n_paths)
         a1 = rng.uniform(cfg.a1_min, cfg.a1_max, size=cfg.n_paths)
         b0 = rng.uniform(cfg.b0_min, cfg.b0_max, size=cfg.n_paths)
@@ -91,12 +152,12 @@ def simulate_observations(cfg: NGAParams) -> tuple[pd.DataFrame, pd.DataFrame]:
 
         drift = (b0 + b1 * x) * dt
 
-        # Vol term corresponds to sqrt(a(x)) where a(x) = (a0 + a1 x^+)^(2 gamma)
+        # Diffusion term equals sqrt(a(x)) for a(x)=(a0+a1 x^+)^(2*gamma).
         vol = np.power(a0 + a1 * x_pos, gamma)
 
         X[:, i + 1] = x + drift + vol * sqrt_dt * Z[:, i]
 
-    # Long format to match canonical observations schema: store X as S
+    # Canonical observations schema uses column name S for the process value.
     path_id = np.repeat(np.arange(cfg.n_paths, dtype=np.int64), cfg.n_steps + 1)
     t_idx = np.tile(np.arange(cfg.n_steps + 1, dtype=np.int32), cfg.n_paths)
     t_years = np.tile(t_grid.astype(np.float32), cfg.n_paths)
@@ -104,7 +165,7 @@ def simulate_observations(cfg: NGAParams) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     df = pd.DataFrame({"path_id": path_id, "t_idx": t_idx, "t_years": t_years, "S": S_long})
 
-    # enforce dtypes
+    # Enforce Arrow-compatible dtypes before serialization.
     df["path_id"] = df["path_id"].astype("int64")
     df["t_idx"] = df["t_idx"].astype("int32")
     df["t_years"] = df["t_years"].astype("float32")

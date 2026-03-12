@@ -1,3 +1,5 @@
+"""Tests for the splits and counts pipeline component."""
+
 from __future__ import annotations
 
 import subprocess
@@ -13,6 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _run_generate(sim: str, out_root: Path, run_id: str, n_paths: int = 200, n_steps: int = 6) -> Path:
+    """Helper for run generate."""
     subprocess.run(
         [
             sys.executable,
@@ -38,6 +41,7 @@ def _run_generate(sim: str, out_root: Path, run_id: str, n_paths: int = 200, n_s
 
 
 def _assert_monotone_per_path(df: pd.DataFrame, col: str) -> None:
+    """Helper for assert monotone per path."""
     for _, sub in df.groupby("path_id", sort=False):
         values = sub.sort_values("t_idx")[col].to_numpy()
         assert (values[1:] >= values[:-1]).all()

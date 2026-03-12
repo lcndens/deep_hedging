@@ -1,16 +1,7 @@
-"""Tests for src/objective_functions/cvar.py — Stage 4b.
-
-Tests cover:
-- Output is a differentiable scalar
-- Analytic correctness against hand-computed CVaR values
-- omega is trainable and updates with optimizer
-- Special cases: alpha=0 reduces to mean loss, high alpha focuses on tail
-- Gradient flow to network weights through CVaR loss
-- Input validation
-"""
+"""Tests for the CVaR objective module."""
 
 from __future__ import annotations
-
+from pathlib import Path
 import pytest
 import torch
 import torch.nn as nn
@@ -21,6 +12,24 @@ from src.state.builder import build_features, FEATURE_DIM
 from src.derivatives.european import call_payoff
 from src.frictions.proportional import proportional_cost
 from src.pnl.compute import compute_pnl
+from src.io.dataset_loader import load_dataset
+from src.generate_dataset import main as generate_dataset
+
+
+@pytest.fixture(scope="module")
+def bs_batch(tmp_path_factory):
+    """Helper for bs batch."""
+    run_dir = generate_dataset([
+        "--sim",            "bs",
+        "--n_paths",        "200",
+        "--n_steps",        "5",
+        "--seed",           "0",
+        "--out_root",       str(tmp_path_factory.mktemp("cvar_bs")),
+        "--run_id",         "test_bs_cvar",
+        "--strike",         "100.0",
+        "--maturity_years", "0.25",
+    ])
+    return load_dataset(run_dir, split="train")
 
 
 # ===========================================================================
@@ -29,34 +38,43 @@ from src.pnl.compute import compute_pnl
 
 class TestConstruction:
 
+    """Test cases for TestConstruction."""
     def test_default_alpha(self):
+        """Assert default alpha."""
         cvar = CVaRLoss()
         assert cvar.alpha == 0.95
 
     def test_custom_alpha(self):
+        """Assert custom alpha."""
         cvar = CVaRLoss(alpha=0.90)
         assert cvar.alpha == 0.90
 
     def test_omega_is_parameter(self):
+        """Assert omega is parameter."""
         cvar = CVaRLoss()
         assert isinstance(cvar.omega, nn.Parameter)
 
     def test_omega_init_zero(self):
+        """Assert omega init zero."""
         cvar = CVaRLoss()
         assert cvar.omega.item() == 0.0
 
     def test_omega_requires_grad(self):
+        """Assert omega requires grad."""
         cvar = CVaRLoss()
         assert cvar.omega.requires_grad
 
     def test_is_nn_module(self):
+        """Assert is nn module."""
         assert isinstance(CVaRLoss(), nn.Module)
 
     def test_invalid_alpha_one_raises(self):
+        """Assert invalid alpha one raises."""
         with pytest.raises(ValueError, match="alpha"):
             CVaRLoss(alpha=1.0)
 
     def test_invalid_alpha_negative_raises(self):
+        """Assert invalid alpha negative raises."""
         with pytest.raises(ValueError, match="alpha"):
             CVaRLoss(alpha=-0.1)
 
@@ -66,6 +84,7 @@ class TestConstruction:
         assert cvar.alpha == 0.0
 
     def test_extra_repr(self):
+        """Assert extra repr."""
         cvar = CVaRLoss(alpha=0.95)
         assert "0.95" in repr(cvar)
 
@@ -76,13 +95,16 @@ class TestConstruction:
 
 class TestOutputProperties:
 
+    """Test cases for TestOutputProperties."""
     def test_output_is_scalar(self):
+        """Assert output is scalar."""
         cvar = CVaRLoss()
         pnl  = torch.randn(1000)
         loss = cvar(pnl)
         assert loss.shape == ()
 
     def test_output_is_finite(self):
+        """Assert output is finite."""
         cvar = CVaRLoss()
         pnl  = torch.randn(1000)
         loss = cvar(pnl)
@@ -96,12 +118,14 @@ class TestOutputProperties:
         assert loss.requires_grad
 
     def test_output_dtype_float32(self):
+        """Assert output dtype float32."""
         cvar = CVaRLoss()
         pnl  = torch.randn(1000, dtype=torch.float32)
         loss = cvar(pnl)
         assert loss.dtype == torch.float32
 
     def test_deterministic(self):
+        """Assert deterministic."""
         cvar = CVaRLoss()
         pnl  = torch.randn(1000)
         assert torch.allclose(cvar(pnl), cvar(pnl))
@@ -113,21 +137,9 @@ class TestOutputProperties:
 
 class TestAnalyticCorrectness:
 
+    """Test cases for TestAnalyticCorrectness."""
     def test_alpha_zero_equals_mean_loss(self):
-        """alpha=0: CVaR = mean(-PnL) = -mean(PnL).
-
-        With alpha=0 and omega converged, L = omega + mean(max(-PnL-omega,0)).
-        At the optimum omega=VaR_0 = min(-PnL), so all paths exceed omega
-        and L reduces to mean(-PnL).
-
-        Simpler check: fix omega=0, then L = mean(max(-PnL, 0)).
-        But with alpha=0 and omega fixed at 0:
-            L = 0 + mean(max(-PnL, 0)) / 1.0
-        This equals mean of positive losses only — not exactly mean(-PnL).
-
-        Instead verify by checking that the optimal omega=0 gives mean(-PnL)
-        when all PnL values are negative (all losses exceed omega=0).
-        """
+        """Assert alpha=0 reduces to mean loss for all-negative PnL samples."""
         cvar = CVaRLoss(alpha=0.0)
         # All paths are losses (negative PnL) → all exceed omega=0
         pnl  = -torch.abs(torch.randn(10000)) - 1.0   # all negative
@@ -148,24 +160,7 @@ class TestAnalyticCorrectness:
         assert torch.allclose(loss, torch.tensor(0.0))
 
     def test_analytic_simple_distribution(self):
-        """Hand-computed CVaR for a known distribution.
-
-        PnL = [-10, -10, ..., -10, 0, 0, ..., 0]
-              first 5% are -10, rest are 0
-        CVaR_0.95 = mean of worst 5% = 10 (loss of 10).
-
-        With omega optimised to VaR=10 (threshold between -10 and 0):
-        excess_i = max(-pnl_i - 10, 0)
-               = max(10-10, 0) = 0  for pnl=-10 paths
-               = max(0-10,  0) = 0  for pnl=0  paths
-        Hmm — need omega at the right level.
-
-        Simpler: use known pnl, fix omega manually, verify formula.
-        pnl = [1, 1, 1, ..., 1, -9]  (N-1 paths gain 1, 1 path loses 9)
-        alpha=0.0, omega=0:
-            excess = [max(-1,0), ..., max(9,0)] = [0,...,0, 9]
-            loss = 0 + 9/N
-        """
+        """Assert CVaR matches a hand-computed value for a simple distribution."""
         N    = 100
         pnl  = torch.ones(N)
         pnl[-1] = -9.0
@@ -224,6 +219,7 @@ class TestAnalyticCorrectness:
 
 class TestOmegaOptimisation:
 
+    """Test cases for TestOmegaOptimisation."""
     def test_omega_updates_after_step(self):
         """omega must change after a backward + optimizer step."""
         cvar      = CVaRLoss(alpha=0.95)
@@ -238,12 +234,7 @@ class TestOmegaOptimisation:
         assert cvar.omega.item() != 0.0, "omega did not update after optimizer step"
 
     def test_omega_converges_toward_var(self):
-        """After many steps, omega should converge toward the empirical VaR_alpha.
-
-        For standard normal PnL and alpha=0.95, VaR_0.95 of the loss
-        distribution (-PnL ~ N(0,1)) is approximately 1.645.
-        So omega should converge toward ~1.645.
-        """
+        """Assert omega converges toward empirical VaR for a Gaussian sample."""
         torch.manual_seed(0)
         cvar      = CVaRLoss(alpha=0.95)
         optimizer = torch.optim.Adam([cvar.omega], lr=0.05)
@@ -289,7 +280,9 @@ class TestOmegaOptimisation:
 
 class TestGradientFlow:
 
+    """Test cases for TestGradientFlow."""
     def test_grad_flows_to_omega(self):
+        """Assert grad flows to omega."""
         cvar = CVaRLoss(alpha=0.95)
         pnl  = torch.randn(1000)
         loss = cvar(pnl)
@@ -298,15 +291,20 @@ class TestGradientFlow:
         assert cvar.omega.grad.abs() > 0
 
     def test_grad_flows_to_network_weights(self):
-        """Gradient must flow from CVaR loss back to network weights."""
+        """Assert CVaR backpropagates non-zero gradients to network parameters."""
         torch.manual_seed(0)
         net  = BaselineFeedforwardNetwork(hidden=32)
-        cvar = CVaRLoss(alpha=0.95)
+        # alpha=0.0: loss = omega + mean(max(-pnl - omega, 0)) / 1.0
+        # with omega=0: loss = mean(max(-pnl, 0)) — still needs negative pnl
+        # Use alpha=0.0 and force omega negative so all paths exceed it
+        cvar = CVaRLoss(alpha=0.0)
+        with torch.no_grad():
+            cvar.omega.fill_(-100.0)   # all paths will exceed this threshold
 
-        features   = torch.randn(200, 10, FEATURE_DIM)
-        deltas     = net.forward_trajectory(features)
-        pnl        = deltas.sum(dim=1)   # dummy pnl — just needs grad path
-        loss       = cvar(pnl)
+        features = torch.randn(200, 10, FEATURE_DIM)
+        deltas   = net.forward_trajectory(features)
+        pnl      = deltas.sum(dim=1)
+        loss     = cvar(pnl)
         loss.backward()
 
         for name, param in net.named_parameters():
@@ -314,10 +312,7 @@ class TestGradientFlow:
             assert param.grad.abs().sum() > 0, f"Zero grad for '{name}'"
 
     def test_only_tail_paths_contribute_grad(self):
-        """Paths with PnL > -omega should have zero contribution to grad.
-
-        With omega=0, only paths where -PnL > 0 (i.e. PnL < 0) contribute.
-        """
+        """Assert only tail-loss paths contribute gradient when omega is fixed."""
         cvar = CVaRLoss(alpha=0.95)
         # Fix omega at 0 to control which paths contribute
         with torch.no_grad():
@@ -341,7 +336,9 @@ class TestGradientFlow:
 
 class TestHelperMethods:
 
+    """Test cases for TestHelperMethods."""
     def test_cvar_estimate_returns_float(self):
+        """Assert cvar estimate returns float."""
         cvar = CVaRLoss()
         pnl  = torch.randn(1000)
         est  = cvar.cvar_estimate(pnl)
@@ -356,15 +353,18 @@ class TestHelperMethods:
         assert cvar.omega.grad is None
 
     def test_cvar_estimate_matches_forward(self):
+        """Assert cvar estimate matches forward."""
         cvar = CVaRLoss()
         pnl  = torch.randn(1000)
         assert abs(cvar.cvar_estimate(pnl) - cvar(pnl).item()) < 1e-6
 
     def test_var_estimate_returns_float(self):
+        """Assert var estimate returns float."""
         cvar = CVaRLoss()
         assert isinstance(cvar.var_estimate(), float)
 
     def test_var_estimate_matches_omega(self):
+        """Assert var estimate matches omega."""
         cvar = CVaRLoss()
         assert cvar.var_estimate() == cvar.omega.item()
 
@@ -375,17 +375,21 @@ class TestHelperMethods:
 
 class TestValidation:
 
+    """Test cases for TestValidation."""
     def test_wrong_ndim_raises(self):
+        """Assert wrong ndim raises."""
         cvar = CVaRLoss()
         with pytest.raises(ValueError, match="1-D"):
             cvar(torch.randn(10, 10))
 
     def test_empty_tensor_raises(self):
+        """Assert empty tensor raises."""
         cvar = CVaRLoss()
         with pytest.raises(ValueError, match="empty"):
             cvar(torch.tensor([]))
 
     def test_nan_input_raises(self):
+        """Assert nan input raises."""
         cvar = CVaRLoss()
         pnl  = torch.randn(100)
         pnl[5] = float("nan")
@@ -394,11 +398,12 @@ class TestValidation:
 
 
 # ===========================================================================
-# Integration — full Stage 1→4 chain
+# Integration tests across data loading, policy inference, and CVaR loss.
 # ===========================================================================
 
 class TestIntegration:
 
+    """Test cases for TestIntegration."""
     def test_full_pipeline_loss_is_scalar(self, bs_batch):
         """End-to-end: features → deltas → pnl → CVaR loss is a scalar."""
         torch.manual_seed(0)

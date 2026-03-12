@@ -1,3 +1,5 @@
+"""Tests for the latent state values pipeline component."""
+
 from __future__ import annotations
 
 import subprocess
@@ -12,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _run_generate(sim: str, out_root: Path, run_id: str, n_paths: int = 50, n_steps: int = 5) -> Path:
+    """Helper for run generate."""
     subprocess.run(
         [
             sys.executable,
@@ -38,6 +41,7 @@ def _run_generate(sim: str, out_root: Path, run_id: str, n_paths: int = 50, n_st
 
 @pytest.mark.parametrize("split", ["train", "val", "test"])
 def test_heston_latent_variance_is_positive(split: str, tmp_path: Path) -> None:
+    """Assert heston latent variance is positive."""
     out_root = tmp_path / "datasets" / "v1.0"
     run_dir = _run_generate(sim="heston", out_root=out_root, run_id="latent-values-heston")
 
@@ -48,6 +52,7 @@ def test_heston_latent_variance_is_positive(split: str, tmp_path: Path) -> None:
 @pytest.mark.parametrize("sim", ["bs", "nga"])
 @pytest.mark.parametrize("split", ["train", "val", "test"])
 def test_bs_and_nga_latent_variance_is_zero(sim: str, split: str, tmp_path: Path) -> None:
+    """Assert bs and nga latent variance is zero."""
     out_root = tmp_path / "datasets" / "v1.0"
     run_dir = _run_generate(sim=sim, out_root=out_root, run_id=f"latent-values-{sim}")
 

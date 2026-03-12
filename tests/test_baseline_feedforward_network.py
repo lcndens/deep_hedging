@@ -1,4 +1,4 @@
-"""Tests for src/policy/network.py — Stage 4a.
+"""Tests for the baseline policy network module.
 
 Tests cover:
 - Architecture properties (shapes, dtypes, parameter count)
@@ -73,15 +73,18 @@ def bs_features(tmp_path_factory):
 
 class TestArchitecture:
 
+    """Test cases for TestArchitecture."""
     def test_input_dim_constant(self):
         """INPUT_DIM must be FEATURE_DIM + 1 = 4."""
         assert INPUT_DIM == FEATURE_DIM + 1
         assert INPUT_DIM == 4
 
     def test_is_nn_module(self, net):
+        """Assert is nn module."""
         assert isinstance(net, nn.Module)
 
     def test_has_trainable_params(self, net):
+        """Assert has trainable params."""
         assert net.n_parameters() > 0
 
     def test_parameter_count_default(self, net):
@@ -94,6 +97,7 @@ class TestArchitecture:
         assert net.n_parameters() == expected
 
     def test_parameter_count_custom_hidden(self):
+        """Assert parameter count custom hidden."""
         net32 = BaselineFeedforwardNetwork(hidden=32)
         expected = (
             INPUT_DIM * 32 + 32 +
@@ -113,10 +117,12 @@ class TestArchitecture:
         assert len(relus) == 2
 
     def test_three_linear_layers(self, net):
+        """Assert three linear layers."""
         linears = [m for m in net.net.children() if isinstance(m, nn.Linear)]
         assert len(linears) == 3
 
     def test_hidden_attribute(self, net):
+        """Assert hidden attribute."""
         assert net.hidden == H
 
 
@@ -126,22 +132,27 @@ class TestArchitecture:
 
 class TestForwardSingleStep:
 
+    """Test cases for TestForwardSingleStep."""
     def test_output_shape(self, net):
+        """Assert output shape."""
         x   = torch.randn(N, INPUT_DIM)
         out = net(x)
         assert out.shape == (N,)
 
     def test_output_dtype_float32(self, net):
+        """Assert output dtype float32."""
         x   = torch.randn(N, INPUT_DIM, dtype=torch.float32)
         out = net(x)
         assert out.dtype == torch.float32
 
     def test_output_device_cpu(self, net):
+        """Assert output device cpu."""
         x   = torch.randn(N, INPUT_DIM)
         out = net(x)
         assert out.device.type == "cpu"
 
     def test_output_is_finite(self, net):
+        """Assert output is finite."""
         x   = torch.randn(N, INPUT_DIM)
         out = net(x)
         assert torch.isfinite(out).all()
@@ -158,6 +169,7 @@ class TestForwardSingleStep:
         )
 
     def test_deterministic_given_same_input(self, net):
+        """Assert deterministic given same input."""
         x    = torch.randn(N, INPUT_DIM)
         out1 = net(x)
         out2 = net(x)
@@ -179,23 +191,29 @@ class TestForwardSingleStep:
 
 class TestForwardTrajectory:
 
+    """Test cases for TestForwardTrajectory."""
     def test_output_shape(self, net, features):
+        """Assert output shape."""
         deltas = net.forward_trajectory(features)
         assert deltas.shape == (N, T)
 
     def test_output_dtype(self, net, features):
+        """Assert output dtype."""
         deltas = net.forward_trajectory(features)
         assert deltas.dtype == torch.float32
 
     def test_output_device_cpu(self, net, features):
+        """Assert output device cpu."""
         deltas = net.forward_trajectory(features)
         assert deltas.device.type == "cpu"
 
     def test_output_is_finite(self, net, features):
+        """Assert output is finite."""
         deltas = net.forward_trajectory(features)
         assert torch.isfinite(deltas).all()
 
     def test_deterministic(self, net, features):
+        """Assert deterministic."""
         d1 = net.forward_trajectory(features)
         d2 = net.forward_trajectory(features)
         assert torch.allclose(d1, d2)
@@ -206,6 +224,7 @@ class TestForwardTrajectory:
         assert deltas.shape[1] == T
 
     def test_path_count(self, net, features):
+        """Assert path count."""
         deltas = net.forward_trajectory(features)
         assert deltas.shape[0] == N
 
@@ -216,6 +235,7 @@ class TestForwardTrajectory:
 
 class TestSemiRecurrence:
 
+    """Test cases for TestSemiRecurrence."""
     def test_initial_delta_is_zero(self, net):
         """At t=0, δ_{-1}=0 — verify by checking input to first step."""
         # If we run one step with δ_{prev}=0 vs δ_{prev}=1, outputs differ
@@ -278,6 +298,7 @@ class TestSemiRecurrence:
 
 class TestGradientFlow:
 
+    """Test cases for TestGradientFlow."""
     def test_gradients_exist_after_backward(self, net, features):
         """loss.backward() must populate gradients for all parameters."""
         deltas = net.forward_trajectory(features)
@@ -339,15 +360,19 @@ class TestGradientFlow:
 
 class TestValidation:
 
+    """Test cases for TestValidation."""
     def test_wrong_ndim_raises(self, net):
+        """Assert wrong ndim raises."""
         with pytest.raises(ValueError, match="3-D"):
             net.forward_trajectory(torch.randn(N, T))   # missing F dim
 
     def test_wrong_feature_dim_raises(self, net):
+        """Assert wrong feature dim raises."""
         with pytest.raises(ValueError, match="FEATURE_DIM"):
             net.forward_trajectory(torch.randn(N, T, 5))   # F=5 instead of 3
 
     def test_nan_input_raises(self, net):
+        """Assert nan input raises."""
         feats = torch.randn(N, T, FEATURE_DIM)
         feats[0, 0, 0] = float("nan")
         with pytest.raises(ValueError, match="NaN"):
@@ -360,7 +385,9 @@ class TestValidation:
 
 class TestIntegration:
 
+    """Test cases for TestIntegration."""
     def test_real_features_shape(self, bs_features):
+        """Assert real features shape."""
         features, batch = bs_features
         torch.manual_seed(0)
         net    = BaselineFeedforwardNetwork(hidden=64)
@@ -368,6 +395,7 @@ class TestIntegration:
         assert deltas.shape == (batch.n_paths, batch.n_steps)
 
     def test_real_features_finite(self, bs_features):
+        """Assert real features finite."""
         features, batch = bs_features
         torch.manual_seed(0)
         net    = BaselineFeedforwardNetwork(hidden=64)

@@ -1,4 +1,8 @@
-"""CLI for plotting sample paths from generated observations data."""
+"""Plotting CLI for visual inspection of simulated observation paths.
+
+This module loads one dataset split, selects representative path IDs, and
+saves a spot-path chart under the corresponding observations split directory.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +18,23 @@ import pyarrow.parquet as pq
 
 
 def load_metadata(run_dir: Path) -> dict:
-    """Load metadata.json for a dataset run."""
+    """Load ``metadata.json`` for a dataset run.
+
+    Parameters
+    ----------
+    run_dir : Path
+        Dataset run directory.
+
+    Returns
+    -------
+    dict
+        Parsed metadata content.
+
+    Raises
+    ------
+    FileNotFoundError
+        If metadata file is missing.
+    """
     meta_path = run_dir / "metadata.json"
     if not meta_path.exists():
         raise FileNotFoundError(f"metadata.json not found in {run_dir}")
@@ -22,7 +42,27 @@ def load_metadata(run_dir: Path) -> dict:
 
 
 def load_split_df(run_dir: Path, split: str) -> pd.DataFrame:
-    """Load observation records for one split from parquet files."""
+    """Load observations for one split from parquet files.
+
+    Parameters
+    ----------
+    run_dir : Path
+        Dataset run directory.
+    split : str
+        Split name, one of ``train``, ``val``, or ``test``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Observation table containing at least ``path_id``, ``t_years``, ``S``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If split directory or parquet files are missing.
+    ValueError
+        If required columns are missing.
+    """
     split_dir = run_dir / "observations" / split
     if not split_dir.exists():
         raise FileNotFoundError(f"Split directory not found: {split_dir}")
@@ -44,13 +84,30 @@ def load_split_df(run_dir: Path, split: str) -> pd.DataFrame:
 
 
 def _stable_seed_from_run_id(run_id: str) -> int:
-    """Convert run_id to a deterministic 32-bit seed."""
+    """Derive a deterministic 32-bit seed from run identifier text.
+
+    Parameters
+    ----------
+    run_id : str
+        Run identifier string.
+
+    Returns
+    -------
+    int
+        Deterministic integer seed.
+    """
     h = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
     return int(h[:8], 16)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the command-line parser for plotting."""
+    """Build CLI parser for observation plotting.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Parser configured for run path, split, and plotting options.
+    """
     p = argparse.ArgumentParser(
         description="Plot sample simulated paths from observations/<split>/ and save the plot in that split folder."
     )
@@ -68,7 +125,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """Load one split, plot selected paths, and save a PNG under that split folder."""
+    """Plot selected paths from one dataset split and save a PNG.
+
+    Parameters
+    ----------
+    argv : Sequence[str] | None, optional
+        Optional argument vector. If ``None``, CLI arguments are parsed from
+        ``sys.argv``.
+
+    Raises
+    ------
+    ModuleNotFoundError
+        If matplotlib is not installed.
+    ValueError
+        If no path IDs are available for plotting.
+    """
     try:
         import matplotlib.pyplot as plt
     except ModuleNotFoundError as exc:
@@ -85,20 +156,20 @@ def main(argv: Sequence[str] | None = None) -> None:
     sim = meta.get("simulator", "unknown")
     run_id = meta.get("run_id", run_dir.name)
 
-    # Pick paths
+    # Choose which paths to visualize.
     unique_ids = df["path_id"].drop_duplicates().to_numpy()
     if len(unique_ids) == 0:
         raise ValueError("No paths found to plot.")
 
     n = min(args.n_paths_plot, len(unique_ids))
     if args.random:
-        # Deterministic randomness based on run_id hash for reproducibility
+        # Seed derived from run_id makes random selection reproducible.
         rng = np.random.default_rng(_stable_seed_from_run_id(run_id))
         ids = rng.choice(unique_ids, size=n, replace=False)
     else:
         ids = unique_ids[:n]
 
-    # Plot
+    # Draw one curve per selected path ID.
     plt.figure()
     for pid in ids:
         sub = df[df["path_id"] == pid].sort_values("t_years")

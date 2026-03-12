@@ -1,3 +1,5 @@
+"""Tests for the plotting outputs pipeline component."""
+
 from __future__ import annotations
 
 import subprocess
@@ -13,6 +15,7 @@ assert matplotlib is not None
 
 
 def _run_generate(sim: str, out_root: Path, run_id: str, n_paths: int = 200, n_steps: int = 6) -> Path:
+    """Helper for run generate."""
     subprocess.run(
         [
             sys.executable,

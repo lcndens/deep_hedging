@@ -1,19 +1,7 @@
-"""Option payoff functions — Stage 3 (Derivatives).
+"""European option payoff functions used in terminal liability calculation.
 
-Terminal payoffs for European options. This module is intentionally minimal —
-it computes the option liability at maturity that the hedger must cover.
-
-Payoffs are computed once per forward pass from the final spot price S_T.
-No parameters, no gradients flow through these functions.
-
-To swap option types per experiment, change which function is called in the
-training loop. The PnL module accepts any (N,) payoff tensor.
-
-Usage
------
-    from src.derivatives.european import call_payoff, put_payoff
-
-    payoff = call_payoff(batch.paths_S[:, -1], batch.K)   # (N,)
+The module maps maturity prices ``S_T`` to per-path liabilities for calls or
+puts, which are then subtracted in the terminal PnL identity.
 """
 
 from __future__ import annotations
@@ -26,14 +14,21 @@ def call_payoff(S_T: torch.Tensor, K: float) -> torch.Tensor:
 
     Parameters
     ----------
-    S_T : torch.Tensor, shape (N,)
-        Spot price at maturity for each path.
+    S_T : torch.Tensor
+        Spot prices at maturity with shape ``(N,)``, where ``N`` is the number
+        of simulated paths.
     K : float
         Strike price. Must be positive.
 
     Returns
     -------
-    payoff : torch.Tensor, shape (N,), same dtype and device as S_T.
+    torch.Tensor
+        Call payoff tensor ``max(S_T - K, 0)`` with shape ``(N,)``.
+
+    Raises
+    ------
+    ValueError
+        If ``S_T`` is not one-dimensional or ``K <= 0``.
     """
     _validate_inputs(S_T, K)
     return torch.clamp(S_T - K, min=0.0)
@@ -44,14 +39,21 @@ def put_payoff(S_T: torch.Tensor, K: float) -> torch.Tensor:
 
     Parameters
     ----------
-    S_T : torch.Tensor, shape (N,)
-        Spot price at maturity for each path.
+    S_T : torch.Tensor
+        Spot prices at maturity with shape ``(N,)``, where ``N`` is the number
+        of simulated paths.
     K : float
         Strike price. Must be positive.
 
     Returns
     -------
-    payoff : torch.Tensor, shape (N,), same dtype and device as S_T.
+    torch.Tensor
+        Put payoff tensor ``max(K - S_T, 0)`` with shape ``(N,)``.
+
+    Raises
+    ------
+    ValueError
+        If ``S_T`` is not one-dimensional or ``K <= 0``.
     """
     _validate_inputs(S_T, K)
     return torch.clamp(K - S_T, min=0.0)
@@ -62,6 +64,20 @@ def put_payoff(S_T: torch.Tensor, K: float) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 def _validate_inputs(S_T: torch.Tensor, K: float) -> None:
+    """Validate payoff input rank and strike positivity.
+
+    Parameters
+    ----------
+    S_T : torch.Tensor
+        Maturity spot tensor with expected shape ``(N,)``.
+    K : float
+        Strike value.
+
+    Raises
+    ------
+    ValueError
+        If ``S_T`` is not one-dimensional or ``K <= 0``.
+    """
     if S_T.ndim != 1:
         raise ValueError(
             f"S_T must be a 1-D tensor of shape (N,), got shape {tuple(S_T.shape)}."

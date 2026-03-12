@@ -1,5 +1,8 @@
-# deep_hedging/src/utils/split.py
-"""Deterministic train/val/test split utilities."""
+"""Deterministic path-index splitting for dataset generation.
+
+This module partitions simulated path identifiers into train/validation/test
+subsets using a seeded permutation so splits are reproducible across runs.
+"""
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -8,7 +11,17 @@ import numpy as np
 
 @dataclass(frozen=True)
 class SplitConfig:
-    """Train/validation/test fractions that must sum to 1.0."""
+    """Fractions for train/validation/test partitions.
+
+    Parameters
+    ----------
+    train : float, default=0.70
+        Fraction assigned to the training split.
+    val : float, default=0.15
+        Fraction assigned to the validation split.
+    test : float, default=0.15
+        Fraction assigned to the test split.
+    """
 
     train: float = 0.70
     val: float = 0.15
@@ -16,9 +29,28 @@ class SplitConfig:
 
 
 def split_path_ids(n_paths: int, seed: int, cfg: SplitConfig) -> dict[str, np.ndarray]:
-    """
-    Deterministic split by permuting path_ids with a seeded RNG.
-    Returns dict with arrays of path_ids: {"train": ..., "val": ..., "test": ...}
+    """Split path identifiers into deterministic train/val/test sets.
+
+    Parameters
+    ----------
+    n_paths : int
+        Total number of paths ``N``.
+    seed : int
+        Random seed used for the permutation.
+    cfg : SplitConfig
+        Split fractions that must sum to 1.0.
+
+    Returns
+    -------
+    dict[str, np.ndarray]
+        Mapping ``{"train", "val", "test"}`` to arrays of integer path IDs.
+
+    Raises
+    ------
+    ValueError
+        If ``n_paths`` is not positive or split fractions do not sum to 1.0.
+    RuntimeError
+        If computed split sizes do not sum back to ``n_paths``.
     """
     if n_paths <= 0:
         raise ValueError("n_paths must be positive")

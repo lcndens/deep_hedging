@@ -1,4 +1,4 @@
-"""Tests for src/io/dataset_loader.py — Stage 1.
+"""Tests for dataset loading and split reconstruction.
 
 All tests use pytest fixtures that generate small datasets into a tmp_path
 directory via generate_dataset.main(). This mirrors the real pipeline exactly
@@ -30,6 +30,7 @@ from tests.conftest import N_PATHS, N_STEPS, T1
 # ---------------------------------------------------------------------------
 
 def _load_train(run_dir: Path) -> DatasetBatch:
+    """Helper for load train."""
     return load_dataset(run_dir, split="train")
 
 
@@ -43,9 +44,11 @@ def _approx_split_n(n_paths: int, frac: float) -> int:
 # ---------------------------------------------------------------------------
 
 class TestShapes:
+    """Test cases for TestShapes."""
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_paths_S_shape(self, sim_fixture, request):
+        """Assert paths S shape."""
         run_dir = request.getfixturevalue(sim_fixture)
         batch = _load_train(run_dir)
         N = batch.n_paths
@@ -55,44 +58,52 @@ class TestShapes:
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_paths_v_shape(self, sim_fixture, request):
+        """Assert paths v shape."""
         run_dir = request.getfixturevalue(sim_fixture)
         batch = _load_train(run_dir)
         assert batch.paths_v.shape == batch.paths_S.shape
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_paths_t_shape(self, sim_fixture, request):
+        """Assert paths t shape."""
         run_dir = request.getfixturevalue(sim_fixture)
         batch = _load_train(run_dir)
         assert batch.paths_t.shape == batch.paths_S.shape
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_n_steps_correct(self, sim_fixture, request):
+        """Assert n steps correct."""
         run_dir = request.getfixturevalue(sim_fixture)
         batch = _load_train(run_dir)
         assert batch.n_steps == N_STEPS
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_n_paths_matches_tensor(self, sim_fixture, request):
+        """Assert n paths matches tensor."""
         run_dir = request.getfixturevalue(sim_fixture)
         batch = _load_train(run_dir)
         assert batch.paths_S.shape[0] == batch.n_paths
 
     def test_all_splits_load(self, bs_run):
+        """Assert all splits load."""
         for split in ("train", "val", "test"):
             batch = load_dataset(bs_run, split=split)
             assert batch.paths_S.ndim == 2
             assert batch.paths_S.shape[1] == T1
 
     def test_train_is_largest_split(self, bs_run):
+        """Assert train is largest split."""
         sizes = load_split_sizes(bs_run)
         assert sizes["train"] > sizes["val"]
         assert sizes["train"] > sizes["test"]
 
     def test_split_sizes_sum_to_n_paths(self, bs_run):
+        """Assert split sizes sum to n paths."""
         sizes = load_split_sizes(bs_run)
         assert sum(sizes.values()) == N_PATHS
 
     def test_split_proportions_approx(self, bs_run):
+        """Assert split proportions approx."""
         sizes = load_split_sizes(bs_run)
         # Train should be roughly 70% ± 5%
         train_frac = sizes["train"] / N_PATHS
@@ -104,34 +115,41 @@ class TestShapes:
 # ---------------------------------------------------------------------------
 
 class TestDtypes:
+    """Test cases for TestDtypes."""
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_paths_S_float32(self, sim_fixture, request):
+        """Assert paths S float32."""
         batch = _load_train(request.getfixturevalue(sim_fixture))
         assert batch.paths_S.dtype == torch.float32
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_paths_v_float32(self, sim_fixture, request):
+        """Assert paths v float32."""
         batch = _load_train(request.getfixturevalue(sim_fixture))
         assert batch.paths_v.dtype == torch.float32
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_paths_t_float32(self, sim_fixture, request):
+        """Assert paths t float32."""
         batch = _load_train(request.getfixturevalue(sim_fixture))
         assert batch.paths_t.dtype == torch.float32
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_K_is_python_float(self, sim_fixture, request):
+        """Assert K is python float."""
         batch = _load_train(request.getfixturevalue(sim_fixture))
         assert isinstance(batch.K, float), f"K should be float, got {type(batch.K)}"
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_T_mat_is_python_float(self, sim_fixture, request):
+        """Assert T mat is python float."""
         batch = _load_train(request.getfixturevalue(sim_fixture))
         assert isinstance(batch.T_mat, float), f"T_mat should be float, got {type(batch.T_mat)}"
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_tensors_on_cpu(self, sim_fixture, request):
+        """Assert tensors on cpu."""
         batch = _load_train(request.getfixturevalue(sim_fixture))
         assert batch.paths_S.device.type == "cpu"
         assert batch.paths_v.device.type == "cpu"
@@ -143,9 +161,11 @@ class TestDtypes:
 # ---------------------------------------------------------------------------
 
 class TestTimeGrid:
+    """Test cases for TestTimeGrid."""
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_t_starts_at_zero(self, sim_fixture, request):
+        """Assert t starts at zero."""
         batch = _load_train(request.getfixturevalue(sim_fixture))
         t0 = batch.paths_t[:, 0]
         assert torch.allclose(t0, torch.zeros_like(t0), atol=1e-6), (
@@ -154,6 +174,7 @@ class TestTimeGrid:
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_t_ends_at_T_mat(self, sim_fixture, request):
+        """Assert t ends at T mat."""
         batch = _load_train(request.getfixturevalue(sim_fixture))
         tT = batch.paths_t[:, -1]
         T_mat = torch.full_like(tT, batch.T_mat)
@@ -164,18 +185,21 @@ class TestTimeGrid:
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_t_is_monotone_increasing(self, sim_fixture, request):
+        """Assert t is monotone increasing."""
         batch = _load_train(request.getfixturevalue(sim_fixture))
         diffs = batch.paths_t[:, 1:] - batch.paths_t[:, :-1]
         assert (diffs >= 0).all(), "paths_t is not monotone increasing along time axis"
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_K_matches_metadata(self, sim_fixture, request):
+        """Assert K matches metadata."""
         run_dir = request.getfixturevalue(sim_fixture)
         batch = _load_train(run_dir)
         assert batch.K == pytest.approx(batch.metadata["contract"]["strike"])
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_T_mat_matches_metadata(self, sim_fixture, request):
+        """Assert T mat matches metadata."""
         run_dir = request.getfixturevalue(sim_fixture)
         batch = _load_train(run_dir)
         assert batch.T_mat == pytest.approx(batch.metadata["time_grid"]["maturity_years"])
@@ -187,31 +211,37 @@ class TestTimeGrid:
 
 class TestVariance:
 
+    """Test cases for TestVariance."""
     def test_v_all_zeros_bs(self, bs_run):
+        """Assert v all zeros bs."""
         batch = _load_train(bs_run)
         assert torch.all(batch.paths_v == 0.0), (
             "BS dataset should have paths_v = 0.0 everywhere"
         )
 
     def test_v_all_zeros_nga(self, nga_run):
+        """Assert v all zeros nga."""
         batch = _load_train(nga_run)
         assert torch.all(batch.paths_v == 0.0), (
             "NGA dataset should have paths_v = 0.0 everywhere"
         )
 
     def test_v_nonzero_heston(self, heston_run):
+        """Assert v nonzero heston."""
         batch = _load_train(heston_run)
         assert batch.paths_v.mean().item() > 0.0, (
             "Heston dataset should have paths_v > 0 on average"
         )
 
     def test_v_nonnegative_heston(self, heston_run):
+        """Assert v nonnegative heston."""
         batch = _load_train(heston_run)
         assert torch.all(batch.paths_v >= 0.0), (
             "Heston variance paths_v should be non-negative (full-truncation scheme)"
         )
 
     def test_v_shape_matches_S_heston(self, heston_run):
+        """Assert v shape matches S heston."""
         batch = _load_train(heston_run)
         assert batch.paths_v.shape == batch.paths_S.shape
 
@@ -222,9 +252,10 @@ class TestVariance:
 
 class TestLatentStateFallback:
 
+    """Test cases for TestLatentStateFallback."""
     def test_fallback_no_error(self, tmp_path, bs_run):
         """Loader should not raise when latent_state/ is absent."""
-        # Copy the bs run to a temp dir and delete latent_state/
+        # Copy the BS run to a scratch directory and delete latent_state/.
         run_copy = tmp_path / "bs_no_latent"
         shutil.copytree(bs_run, run_copy)
         shutil.rmtree(run_copy / "latent_state", ignore_errors=True)
@@ -268,15 +299,19 @@ class TestLatentStateFallback:
 
 class TestErrors:
 
+    """Test cases for TestErrors."""
     def test_invalid_split_raises(self, bs_run):
+        """Assert invalid split raises."""
         with pytest.raises(ValueError, match="Invalid split"):
             load_dataset(bs_run, split="bad")
 
     def test_missing_run_dir_raises(self, tmp_path):
+        """Assert missing run dir raises."""
         with pytest.raises(FileNotFoundError):
             load_dataset(tmp_path / "does_not_exist", split="train")
 
     def test_missing_observations_file_raises(self, tmp_path, bs_run):
+        """Assert missing observations file raises."""
         run_copy = tmp_path / "bs_missing_obs"
         shutil.copytree(bs_run, run_copy)
         (run_copy / "observations" / "train" / "part-00000.parquet").unlink()
@@ -285,6 +320,7 @@ class TestErrors:
             load_dataset(run_copy, split="train")
 
     def test_invalid_split_sizes_raises(self, tmp_path):
+        """Assert invalid split sizes raises."""
         with pytest.raises(FileNotFoundError):
             load_split_sizes(tmp_path / "does_not_exist")
 
@@ -295,6 +331,7 @@ class TestErrors:
 
 class TestBatchImmutability:
 
+    """Test cases for TestBatchImmutability."""
     def test_frozen_prevents_attribute_set(self, bs_run):
         """DatasetBatch is frozen — direct attribute assignment must raise."""
         from dataclasses import FrozenInstanceError
@@ -303,11 +340,13 @@ class TestBatchImmutability:
             batch.K = 999.0  # type: ignore[misc]
 
     def test_metadata_is_dict(self, bs_run):
+        """Assert metadata is dict."""
         batch = _load_train(bs_run)
         assert isinstance(batch.metadata, dict)
         assert "simulator" in batch.metadata
 
     def test_metadata_contains_n_steps(self, bs_run):
+        """Assert metadata contains n steps."""
         batch = _load_train(bs_run)
         assert batch.metadata["time_grid"]["n_steps"] == N_STEPS
 
@@ -318,16 +357,20 @@ class TestBatchImmutability:
 
 class TestLoadSplitSizes:
 
+    """Test cases for TestLoadSplitSizes."""
     def test_returns_three_keys(self, bs_run):
+        """Assert returns three keys."""
         sizes = load_split_sizes(bs_run)
         assert set(sizes.keys()) == {"train", "val", "test"}
 
     def test_all_values_positive(self, bs_run):
+        """Assert all values positive."""
         sizes = load_split_sizes(bs_run)
         for k, v in sizes.items():
             assert v > 0, f"Split '{k}' has zero paths"
 
     def test_sum_equals_n_paths(self, bs_run):
+        """Assert sum equals n paths."""
         sizes = load_split_sizes(bs_run)
         assert sum(sizes.values()) == N_PATHS
 
@@ -344,6 +387,7 @@ class TestLoadSplitSizes:
 
     @pytest.mark.parametrize("sim_fixture", ["bs_run", "heston_run", "nga_run"])
     def test_works_for_all_sims(self, sim_fixture, request):
+        """Assert works for all sims."""
         run_dir = request.getfixturevalue(sim_fixture)
         sizes = load_split_sizes(run_dir)
         assert sum(sizes.values()) == N_PATHS

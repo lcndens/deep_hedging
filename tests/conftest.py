@@ -1,3 +1,5 @@
+"""Tests for the conftest pipeline component."""
+
 from pathlib import Path
 import sys
 

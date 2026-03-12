@@ -1,4 +1,8 @@
-"""CLI for generating canonical simulated hedging datasets."""
+"""Dataset generation CLI for deep-hedging experiments.
+
+This module simulates price paths, applies deterministic split assignment, and
+writes schema-validated parquet datasets consumed by the training pipeline.
+"""
 
 from __future__ import annotations
 
@@ -26,17 +30,43 @@ from src.simulators.bs import BSParams, simulate_observations as simulate_bs
 from src.simulators.heston import HestonParams, simulate_observations as simulate_heston
 from src.simulators.nga import NGAParams, simulate_observations as simulate_nga
 
-
-
-
 def make_run_id(sim: str, seed: int, n_paths: int, n_steps: int) -> str:
-    """Create a run identifier used as the dataset folder name."""
+    """Create a timestamped dataset run identifier.
+
+    Parameters
+    ----------
+    sim : str
+        Simulator name.
+    seed : int
+        Simulation seed.
+    n_paths : int
+        Number of simulated paths ``N``.
+    n_steps : int
+        Number of hedging timesteps ``T``.
+
+    Returns
+    -------
+    str
+        Run identifier used as dataset folder name.
+    """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"{ts}_{sim}_seed-{seed}_n-{n_paths}_steps-{n_steps}"
 
 
 def write_contracts(out_path: Path, contract_type: str, strike: float, maturity_years: float) -> None:
-    """Write the one-row contracts Parquet file for a dataset run."""
+    """Write one-row contract metadata parquet for a dataset run.
+
+    Parameters
+    ----------
+    out_path : Path
+        Output path for ``contracts.parquet``.
+    contract_type : str
+        Option type label, for example ``"call"`` or ``"put"``.
+    strike : float
+        Contract strike ``K``.
+    maturity_years : float
+        Contract maturity ``T_mat`` in years.
+    """
     df = pd.DataFrame([{
         "contract_id": 0,
         "type": contract_type,
@@ -48,7 +78,13 @@ def write_contracts(out_path: Path, contract_type: str, strike: float, maturity_
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the command-line parser for dataset generation."""
+    """Build the command-line parser for dataset generation.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Parser configured with simulator, path, contract, and split arguments.
+    """
     p = argparse.ArgumentParser(description="Generate canonical Parquet datasets (schema v1.0).")
 
     p.add_argument("--sim", type=str, default="bs", choices=["bs", "heston", "nga"])
@@ -105,7 +141,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> Path:
-    """Generate one dataset run and return the created run directory path."""
+    """Generate one dataset run and return its directory path.
+
+    Parameters
+    ----------
+    argv : Sequence[str] | None, optional
+        Optional argument vector. If ``None``, arguments are read from CLI.
+
+    Returns
+    -------
+    Path
+        Created dataset run directory.
+
+    Raises
+    ------
+    ValueError
+        If simulator selection is unsupported or schema checks fail.
+    """
     args = build_parser().parse_args(argv)
 
     split_cfg = SplitConfig(train=args.split_train, val=args.split_val, test=args.split_test)
@@ -114,7 +166,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
     run_dir = Path(args.out_root) / args.sim / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Simulate
+    # Simulate spot and latent-state trajectories for the chosen model.
     if args.sim == "bs":
         sim_cfg = BSParams(
             s0=args.s0,
@@ -167,7 +219,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
     else:
         raise ValueError(f"Unsupported sim: {args.sim}")
 
-    # Enforce schema columns exactly (no extras)
+    # Enforce exact schema columns before split writes.
     obs_cols = [f.name for f in OBS_SCHEMA]
     if set(obs.columns) != set(obs_cols):
         raise ValueError(f"Observations columns mismatch. expected={obs_cols}, got={list(obs.columns)}")
@@ -180,7 +232,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
         )
     latent_state = latent_state.loc[:, latent_cols].copy()
 
-    # Split path ids and write splits to non-hive folder names
+    # Split path IDs once, then write each split to train/val/test folders.
     splits = split_path_ids(n_paths=args.n_paths, seed=args.seed, cfg=split_cfg)
 
     for split_name, ids in splits.items():
@@ -197,7 +249,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             compression="zstd",
         )
 
-    # Contracts + metadata
+    # Persist single-contract metadata and run-level metadata.json.
     write_contracts(run_dir / "contracts.parquet", args.contract_type, args.strike, args.maturity_years)
 
     metadata = {

@@ -8,19 +8,11 @@
 
 ## Overview
 
-This repository implements and compares multiple deep hedging frameworks for pricing and hedging European call options under three market simulators: Black-Scholes (BS), Heston stochastic volatility, and Normal-Gamma (NGA) jump diffusion. The project is structured around three aims:
-
-- **Aim 1:** Data pipeline and simulator infrastructure
-- **Aim 2:** Baseline deep hedging implementation (Buehler et al., 2019)
-- **Aim 3:** Extended frameworks including No-Transaction Band, Robust Deep Hedging, and Adversarial Training
-
-All models are trained on the UMass Unity Cluster using PyTorch with CVaR at α=0.95 as the risk objective.
+TODO
 
 ---
 
 ## Installation
-
-This project runs on the UMass Unity Cluster with a micromamba environment.
 
 ```bash
 # Clone the repository
@@ -57,7 +49,7 @@ deep_hedging/
 │   ├── generate_dataset.py  # CLI: generate and save a dataset
 │   └── plot_observations.py # CLI: visualise simulated paths
 │
-├── tests/                   # Pytest test suite (288 tests)
+├── tests/                   # Pytest test suite
 ├── data/                    # Simulated datasets (git-ignored)
 │   └── datasets/v1.0/<sim>/<run_id>/
 ├── results/                 # Training runs and evaluation (git-ignored)
@@ -151,27 +143,6 @@ results/evaluation/baseline_frictionless/
 
 ---
 
-## Training on the Unity Cluster (SLURM)
-
-Full training runs are submitted via SLURM. The workflow for each simulator is:
-
-```bash
-# 1. Generate dataset (interactive node or login node — fast)
-python -m src.generate_dataset --sim heston --n_paths 100000 ...
-
-# 2. Update DATASET_RUN_ID in the training script
-#    scripts/train_heston_baseline.sh
-
-# 3. Submit the job
-sbatch scripts/train_heston_baseline.sh
-
-# 4. Monitor
-squeue -u ldensmore_umass_edu
-tail -f logs/slurm/<job_id>_heston_baseline.out
-```
-
----
-
 ## Running Tests
 
 ```bash
@@ -182,7 +153,7 @@ pytest tests/ -v
 pytest tests/test_trainer.py -v
 ```
 
-288 tests across all pipeline stages. All should pass before running training.
+All should pass before running training.
 
 ---
 

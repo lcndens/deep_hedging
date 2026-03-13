@@ -23,27 +23,13 @@
    - [CVaR Objective](#59-cvar-objective)
    - [Training Loop](#510-training-loop)
    - [Evaluation](#511-evaluation)
-6. [Extensibility Map](#6-extensibility-map)
+6. [Extension Map](#6-extensibility-map)
 
 ---
 
 ## 1. Design Decisions
 
-The following decisions are fixed across all thesis experiments. They are grounded in consensus across the literature and chosen to allow fair cross-framework comparison.
-
-| Decision | Choice | Rationale |
-|---|---|---|
-| Heston variance `v` | Observable; stored in separate latent parquet | Standard in all papers; clean separation of observable vs latent state |
-| `v` for BS / NGA | Zero placeholder | One network architecture across all three simulators — no branching |
-| Network sharing | One shared network across all timesteps | Markov formulation (Buehler Remark 4.6); standard practice |
-| `p0` during training | Fixed at `0.0` | Cash-invariance of CVaR; He et al. (2025) explicit standard |
-| `n_steps` | 30 | Daily rebalancing over T = 30/365 yr; matches Buehler et al. (2019) |
-| Dataset size | 100,000 training paths | Consistent with He et al. and Carbonneau & Godin |
-| Data loading | Full CPU RAM load; mini-batch sample to GPU | Avoids disk I/O bottleneck during training |
-| Optimizer | Adam | Universal across all papers |
-| Risk measure | CVaR via OCE (`alpha=0.95`) | Differentiable; standard in Buehler, He, Carbonneau |
-| Network architecture | 2-layer feedforward, H=64, ReLU | Baseline for all Aim 2/3 experiments |
-| Contract | European call, K=100, T=0.25 yr | Simplicity; standard in literature |
+TODO
 
 ---
 
@@ -166,7 +152,7 @@ The pipeline has two phases: **data generation** (run once per simulator) and **
 ┌─────────────────────────────────────────────────────────┐
 │                    DATA GENERATION                      │
 │                                                         │
-│  Simulator → parquet_writer → disk (data/datasets/)    │
+│  Simulator → parquet_writer → disk (data/datasets/)     │
 │  (BS / Heston / NGA)                                    │
 └─────────────────────────────────────────────────────────┘
                             │
@@ -174,22 +160,22 @@ The pipeline has two phases: **data generation** (run once per simulator) and **
 ┌─────────────────────────────────────────────────────────┐
 │                      TRAINING                           │
 │                                                         │
-│  dataset_loader → build_features → policy network      │
-│       ↓                                  ↓             │
-│  paths_S (N,T+1)               deltas (N,T)            │
-│       ↓                                  ↓             │
-│  call_payoff ──────────────► compute_pnl → CVaR loss   │
-│  proportional_cost ──────────────────────────►         │
-│                                          ↓             │
-│                               loss.backward()          │
-│                               Adam step                │
+│  dataset_loader → build_features → policy network       │
+│       ↓                                  ↓              │
+│  paths_S (N,T+1)               deltas (N,T)             │
+│       ↓                                  ↓              │
+│  call_payoff ──────────────► compute_pnl → CVaR loss    │
+│  proportional_cost ──────────────────────────►          │
+│                                          ↓              │
+│                               loss.backward()           │
+│                               Adam step                 │
 └─────────────────────────────────────────────────────────┘
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────┐
 │                     EVALUATION                          │
 │                                                         │
-│  best_model.pt + test split → metrics + charts         │
+│  best_model.pt + test split → metrics + charts          │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -483,34 +469,46 @@ Passes if MAE < 0.02 between network delta and `N(d1)` across all paths and time
 
 ```bash
 python -m src.evaluation.bs_delta_check \
-    --checkpoint  results/runs/bs/<run_name>/checkpoints/best_model.pt \
-    --dataset_dir data/datasets/v1.0/bs/<run_id> \
+    --checkpoint  results/runs/bs//checkpoints/best_model.pt \
+    --dataset_dir data/datasets/v1.0/bs/ \
     --sigma       0.2 \
-    --out_dir     results/evaluation/<run_name>
+    --out_dir     results/evaluation/
 ```
 
 #### Full Evaluation Suite
 
 **`src/evaluation/evaluate.py`**
 
-Runs the complete evaluation across one or more trained runs. Produces:
+Runs the complete evaluation across one or more trained runs. All metrics are computed on the **test split** — paths never seen during training or validation. Network deltas are clamped to `[0, 1]` during evaluation, as call option delta is bounded by definition and rare extreme values on tail paths indicate network extrapolation failure rather than meaningful hedging behavior.
 
-- **Table 1** (`table1_results.csv`): CVaR₀.₉₅, VaR₀.₉₅, mean PnL, std PnL, P10 PnL per run
-- **Chart 1** (`chart1_pnl_histogram_<sim>.png`): PnL distribution histogram. For BS: overlays analytical BS delta benchmark. For Heston/NGA: deep hedge only.
-- **Chart 2** (`chart2_loss_curves.png`): Train and val CVaR loss over epochs for all runs on one figure
-- **Chart 4** (`chart4_per_timestep_<sim>.png`): Per-timestep delta standard deviation; for BS also overlays MAE vs analytical delta
+Accepts any combination of simulators and epsilon values in a single call. Each run is evaluated independently and all outputs are written to a shared `out_dir`.
 
 ```bash
 python -m src.evaluation.evaluate \
     results/runs/bs/bs_baseline_frictionless \
+    results/runs/bs/bs_epsilon_01 \
     results/runs/heston/heston_baseline_frictionless \
     results/runs/nga/nga_baseline_frictionless \
-    --out_dir results/evaluation/baseline_frictionless
+    --out_dir results/evaluation/baseline
 ```
+
+**Outputs:**
+
+**Table 1** — `table1_results.csv`
+Primary results table. One row per run with columns: `run_name`, `sim`, `cvar_95`, `var_95`, `mean_pnl`, `std_pnl`, `p10_pnl`, `best_epoch`, `n_epochs`.
+
+**Chart 1** — `chart1_pnl_histogram_<sim>_<run_name>.png`
+Terminal PnL distribution histogram per run. For all BS runs, overlays the analytical BS delta benchmark in red regardless of epsilon — this makes the cost of transaction costs directly visible as a leftward shift in the distribution. Both distributions include a dashed VaR₀.₉₅ marker. For Heston and NGA, deep hedge only.
+
+**Chart 2** — `chart2_loss_curves.png`
+Train and val CVaR loss over epochs for all runs on one figure. All runs are plotted together with one color per simulator.
+
+**Chart 4** — `chart4_per_timestep.png`
+Mean absolute position change `mean(|δ_t − δ_{t-1}|)` per timestep for all runs, starting from timestep 1 (the first rebalance). The initial entry trade at t=0 is omitted as it dominates the scale. This chart shows how aggressively the network is trading at each point in the option's life. Under transaction costs the network learns to trade less, which appears as a flatter, lower curve compared to the frictionless baseline.
 
 ---
 
-## 6. Extensibility Map
+## 6. Extension Map
 
 Each Aim 3 framework modifies at most one or two modules. All other modules are shared unchanged.
 
@@ -519,6 +517,5 @@ Each Aim 3 framework modifies at most one or two modules. All other modules are 
 | No-Transaction Band (Imaki 2021) | `policy/` | Network outputs `(b_lower, b_upper)` bands; delta = clamp(delta_{t-1}, bl, bu) |
 | Mean-Variance (Cao 2021) | `objective_functions/` | New `mean_variance.py`; loss = −E[PnL] + λ·Var[PnL] |
 | Robust Deep Hedging (Lütkebohmert 2022) | `train/` | Sample fresh NGA parameters per path per step during training |
-| Adversarial Training (He 2025) | `train/` | Add FGSM/PGD perturbation to features before each forward pass |
-| Equal Risk Pricing (Carbonneau 2021) | `policy/` + `train/` | Two networks (long + short); joint CVaR minimisation |
+| Adversarial Training (He 2025) | `train/` | Add perturbation to features before each forward pass |
 | BS Delta Benchmark | `evaluation/` | Analytical N(d1); no training needed; plugs into shared eval metrics |

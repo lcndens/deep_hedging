@@ -2,6 +2,7 @@
 
 **Thesis:** A Comparative Study of Deep Hedging Methods in Incomplete Markets  
 **Author:** Lucian Densmore | UMass Amherst | Spring 2026  
+**Advisor:** [Advisor Name]  
 **License:** MIT
 
 ---
@@ -13,6 +14,8 @@ TODO
 ---
 
 ## Installation
+
+This project runs on the UMass Unity Cluster with a micromamba environment.
 
 ```bash
 # Clone the repository
@@ -49,7 +52,7 @@ deep_hedging/
 │   ├── generate_dataset.py  # CLI: generate and save a dataset
 │   └── plot_observations.py # CLI: visualise simulated paths
 │
-├── tests/                   # Pytest test suite
+├── tests/                   # Pytest test suite (288 tests)
 ├── data/                    # Simulated datasets (git-ignored)
 │   └── datasets/v1.0/<sim>/<run_id>/
 ├── results/                 # Training runs and evaluation (git-ignored)
@@ -117,29 +120,31 @@ A passed check (MAE < 0.02) confirms the pipeline is correct before proceeding t
 
 ### 4. Evaluate and generate results
 
-Pass one or more completed run directories to produce Table 1 and all charts:
+Pass one or more completed run directories to produce Table 1 and all charts. Any mix of simulators and epsilon values can be passed in a single call:
 
 ```bash
 python -m src.evaluation.evaluate \
     results/runs/bs/bs_baseline_frictionless \
+    results/runs/bs/bs_epsilon_01 \
     results/runs/heston/heston_baseline_frictionless \
     results/runs/nga/nga_baseline_frictionless \
-    --out_dir results/evaluation/baseline_frictionless
+    --out_dir results/evaluation/baseline
 ```
 
 Outputs:
 
 ```
-results/evaluation/baseline_frictionless/
-    table1_results.csv               ← primary results table
-    chart1_pnl_histogram_bs.png      ← PnL distribution per simulator
-    chart1_pnl_histogram_heston.png
-    chart1_pnl_histogram_nga.png
-    chart2_loss_curves.png           ← training convergence
-    chart4_per_timestep_bs.png       ← per-timestep delta analysis
-    chart4_per_timestep_heston.png
-    chart4_per_timestep_nga.png
+results/evaluation/baseline/
+    table1_results.csv                                  ← primary results table
+    chart1_pnl_histogram_bs_bs_baseline_frictionless.png   ← PnL distribution per run
+    chart1_pnl_histogram_bs_bs_epsilon_01.png
+    chart1_pnl_histogram_heston_heston_baseline_frictionless.png
+    chart1_pnl_histogram_nga_nga_baseline_frictionless.png
+    chart2_loss_curves.png                              ← training convergence, all runs
+    chart4_per_timestep.png                             ← mean rebalancing trade size
 ```
+
+Chart 1 overlays the analytical BS delta benchmark on all BS runs — useful for directly comparing frictionless vs friction PnL distributions against the no-cost theoretical optimum. Chart 4 shows mean absolute position change `mean(|δ_t − δ_{t-1}|)` per timestep from t=1 onward for all runs on one figure; under transaction costs the network trades less, which appears as a flatter curve.
 
 ---
 
@@ -153,7 +158,7 @@ pytest tests/ -v
 pytest tests/test_trainer.py -v
 ```
 
-All should pass before running training.
+288 tests across all pipeline stages. All should pass before running training.
 
 ---
 
@@ -176,7 +181,4 @@ All should pass before running training.
 ## References
 
 - Buehler et al. (2019). *Deep Hedging.*
-- He et al. (2025). *Empirical Deep Hedging.*
-- Carbonneau & Godin (2021). *Equal Risk Pricing of Derivatives with Deep Hedging.*
 - Lütkebohmert et al. (2022). *Robust Deep Hedging.*
-- Imaki et al. (2021). *No-Transaction Band Network.*

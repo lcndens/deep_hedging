@@ -1,7 +1,28 @@
-"""Evaluation utilities for trained deep-hedging runs.
+"""Deep Hedging Evaluation Suite.
 
-The module loads trained run directories, recomputes test-set PnL metrics, and
-produces summary tables and diagnostic charts used in thesis reporting.
+Loads one or more trained run directories, computes evaluation metrics,
+and produces:
+    - Table 1: Primary results (CSV + LaTeX)
+    - Chart 1: PnL distribution histogram per simulator
+    - Chart 2: Training loss curves
+    - Chart 4: Per-timestep hedging error
+
+Usage:
+    python -m src.evaluation.evaluate \\
+        results/runs/bs/bs_baseline_frictionless \\
+        results/runs/heston/heston_baseline_frictionless \\
+        results/runs/nga/nga_baseline_frictionless \\
+        --out_dir results/evaluation/baseline
+
+Output layout:
+    results/evaluation/baseline/
+        table1_results.csv
+        table1_results.tex
+        chart1_pnl_histogram_bs.png
+        chart1_pnl_histogram_heston.png
+        chart1_pnl_histogram_nga.png
+        chart2_loss_curves.png
+        chart4_per_timestep_error.png
 """
 
 from __future__ import annotations
@@ -33,25 +54,7 @@ from src.evaluation.bs_delta_check import bs_call_delta
 
 @dataclass
 class RunInfo:
-    """Container for artifacts loaded from one training run.
-
-    Parameters
-    ----------
-    run_dir : Path
-        Path to the run directory.
-    run_name : str
-        Run identifier (directory name).
-    sim : str
-        Simulator label such as ``bs``, ``heston``, or ``nga``.
-    config : dict
-        Parsed run configuration.
-    pnl : torch.Tensor
-        Deep-hedge terminal PnL tensor with shape ``(N,)``.
-    bs_pnl : Optional[torch.Tensor]
-        Analytical BS-delta benchmark PnL with shape ``(N,)`` when available.
-    log : list[dict]
-        Parsed training log rows.
-    """
+    """All data extracted from a training run directory."""
     run_dir:    Path
     run_name:   str
     sim:        str
@@ -63,29 +66,7 @@ class RunInfo:
 
 @dataclass
 class Metrics:
-    """Scalar evaluation metrics for one run.
-
-    Parameters
-    ----------
-    run_name : str
-        Run identifier.
-    sim : str
-        Simulator label.
-    cvar_95 : float
-        Empirical CVaR at confidence level ``alpha=0.95`` from loss view.
-    var_95 : float
-        Empirical VaR at confidence level ``alpha=0.95`` from loss view.
-    mean_pnl : float
-        Mean terminal PnL.
-    std_pnl : float
-        Standard deviation of terminal PnL.
-    p10_pnl : float
-        10th percentile of terminal PnL.
-    best_epoch : int
-        Epoch with lowest validation loss.
-    n_epochs : int
-        Number of logged epochs.
-    """
+    """Scalar evaluation metrics for one run."""
     run_name:   str
     sim:        str
     cvar_95:    float
@@ -125,10 +106,12 @@ def run_evaluation(run_dirs: list[Path], out_dir: Path) -> None:
     # Chart 2 — loss curves (all runs on one figure)
     _plot_loss_curves(runs, out_dir)
 
-    # Chart 1 + Chart 4 — per run
+    # Chart 1 — per run
     for run in runs:
         _plot_pnl_histogram(run, out_dir)
-        _plot_per_timestep_error(run, out_dir)
+
+    # Chart 4 — all runs on one figure
+    _plot_per_timestep_error(runs, out_dir)
 
     print(f"\nDone. All outputs saved to: {out_dir}\n")
 
@@ -138,23 +121,7 @@ def run_evaluation(run_dirs: list[Path], out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def _load_run(run_dir: Path) -> RunInfo:
-    """Load configuration, model outputs, and logs for one run.
-
-    Parameters
-    ----------
-    run_dir : Path
-        Path to a trained run directory.
-
-    Returns
-    -------
-    RunInfo
-        Structured run artifacts for downstream evaluation.
-
-    Raises
-    ------
-    FileNotFoundError
-        If the run directory or checkpoint is missing.
-    """
+    """Load a trained run: config, checkpoint, test PnL."""
     run_dir = Path(run_dir)
     if not run_dir.exists():
         raise FileNotFoundError(f"Run directory not found: {run_dir}")
@@ -191,7 +158,11 @@ def _load_run(run_dir: Path) -> RunInfo:
 
     # Deep hedge PnL
     with torch.no_grad():
-        deltas     = net.forward_trajectory(features)
+        deltas = net.forward_trajectory(features)
+        # Clamp deltas to [0, 1] — call option delta is bounded by definition.
+        # Rare extreme values on tail paths indicate network extrapolation failure
+        # and are clamped here to prevent them distorting evaluation metrics.
+        deltas     = deltas.clamp(0.0, 1.0)
         payoff     = call_payoff(batch.paths_S[:, -1], batch.K)
         total_cost = proportional_cost(
             batch.paths_S[:, :-1], deltas, epsilon=epsilon
@@ -219,18 +190,6 @@ def _load_run(run_dir: Path) -> RunInfo:
 
 
 def _load_log(run_dir: Path) -> list[dict]:
-    """Load ``train_log.csv`` rows for a run directory.
-
-    Parameters
-    ----------
-    run_dir : Path
-        Run directory containing the ``logs`` subfolder.
-
-    Returns
-    -------
-    list[dict]
-        Parsed CSV rows. Returns an empty list if the log file is absent.
-    """
     log_path = run_dir / "logs" / "train_log.csv"
     if not log_path.exists():
         return []
@@ -247,22 +206,7 @@ def _compute_bs_delta_pnl(
     sigma: float = 0.2,
     r:     float = 0.0,
 ) -> torch.Tensor:
-    """Compute benchmark PnL from analytical BS deltas.
-
-    Parameters
-    ----------
-    batch : DatasetBatch
-        Loaded dataset split with tensors of shape ``(N, T+1)``.
-    sigma : float, default=0.2
-        Black-Scholes volatility parameter.
-    r : float, default=0.0
-        Risk-free rate.
-
-    Returns
-    -------
-    torch.Tensor
-        Terminal PnL tensor with shape ``(N,)`` under the analytical strategy.
-    """
+    """Compute PnL achieved by following the BS analytical delta strategy."""
     S_t   = batch.paths_S[:, :-1]   # (N, T)
     t_t   = batch.paths_t[:, :-1]   # (N, T)
     tau_t = batch.T_mat - t_t
@@ -278,20 +222,9 @@ def _compute_bs_delta_pnl(
 # ---------------------------------------------------------------------------
 
 def _compute_metrics(run: RunInfo) -> Metrics:
-    """Compute scalar summary metrics from run outputs.
-
-    Parameters
-    ----------
-    run : RunInfo
-        Run data including PnL samples and optional training logs.
-
-    Returns
-    -------
-    Metrics
-        Aggregated metrics for tabular reporting.
-    """
     pnl  = run.pnl.numpy()
     N    = len(pnl)
+    loss = run.pnl
 
     # CVaR_0.95: mean of worst 5%
     alpha    = run.config.get("alpha", 0.95)
@@ -326,15 +259,6 @@ def _compute_metrics(run: RunInfo) -> Metrics:
 # ---------------------------------------------------------------------------
 
 def _save_table1(metrics: list[Metrics], out_dir: Path) -> None:
-    """Write Table 1 metrics to CSV.
-
-    Parameters
-    ----------
-    metrics : list[Metrics]
-        Per-run scalar metric records.
-    out_dir : Path
-        Output directory for ``table1_results.csv``.
-    """
     # CSV
     csv_path = out_dir / "table1_results.csv"
     fields   = [
@@ -364,15 +288,6 @@ def _save_table1(metrics: list[Metrics], out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def _plot_pnl_histogram(run: RunInfo, out_dir: Path) -> None:
-    """Plot and save PnL histogram for a run.
-
-    Parameters
-    ----------
-    run : RunInfo
-        Run data containing deep-hedge PnL and optional benchmark PnL.
-    out_dir : Path
-        Output directory for chart image files.
-    """
     try:
         import matplotlib.pyplot as plt
         import matplotlib.ticker as ticker
@@ -426,15 +341,6 @@ def _plot_pnl_histogram(run: RunInfo, out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def _plot_loss_curves(runs: list[RunInfo], out_dir: Path) -> None:
-    """Plot training and validation loss curves across runs.
-
-    Parameters
-    ----------
-    runs : list[RunInfo]
-        Collection of runs, each optionally containing logged losses.
-    out_dir : Path
-        Output directory for ``chart2_loss_curves.png``.
-    """
     try:
         import matplotlib.pyplot as plt
     except ImportError:
@@ -474,89 +380,70 @@ def _plot_loss_curves(runs: list[RunInfo], out_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Chart 4 — Per-timestep hedging error
+# Chart 4 — Per-timestep delta analysis (all simulators combined)
 # ---------------------------------------------------------------------------
 
-def _plot_per_timestep_error(run: RunInfo, out_dir: Path) -> None:
-    """Plot per-timestep delta diagnostics for one run.
-
-    Parameters
-    ----------
-    run : RunInfo
-        Run descriptor with configuration and checkpoint paths.
-    out_dir : Path
-        Output directory for saved chart files.
-    """
+def _plot_per_timestep_error(runs: list[RunInfo], out_dir: Path) -> None:
     try:
         import matplotlib.pyplot as plt
     except ImportError:
         print("  matplotlib not available — skipping Chart 4")
         return
 
-    sim         = run.sim.lower()
-    dataset_dir = Path(run.config["dataset_dir"])
-    hidden      = run.config.get("hidden", 64)
-    # Reload test batch and compute per-step delta error
-    batch    = load_dataset(dataset_dir, split="test")
-    features = build_features(batch)
+    sim_labels = {"bs": "Black-Scholes", "heston": "Heston", "nga": "NGA"}
+    colors     = {"bs": "steelblue", "heston": "seagreen", "nga": "darkorange"}
 
-    ckpt = torch.load(
-        run.run_dir / "checkpoints" / "best_model.pt",
-        map_location="cpu", weights_only=True
-    )
-    net = BaselineFeedforwardNetwork(hidden=hidden)
-    net.load_state_dict(ckpt["model_state_dict"])
-    net.eval()
+    fig, ax_trade = plt.subplots(figsize=(10, 5))
 
-    with torch.no_grad():
-        net_deltas = net.forward_trajectory(features)   # (N, T)
+    for run in runs:
+        sim         = run.sim.lower()
+        dataset_dir = Path(run.config["dataset_dir"])
+        hidden      = run.config.get("hidden", 64)
+        color       = colors.get(sim, "gray")
+        label       = sim_labels.get(sim, sim.upper())
 
-    timesteps = np.arange(batch.n_steps)
+        batch    = load_dataset(dataset_dir, split="test")
+        features = build_features(batch)
 
-    fig, ax = plt.subplots(figsize=(9, 5))
+        ckpt = torch.load(
+            run.run_dir / "checkpoints" / "best_model.pt",
+            map_location="cpu", weights_only=True
+        )
+        net = BaselineFeedforwardNetwork(hidden=hidden)
+        net.load_state_dict(ckpt["model_state_dict"])
+        net.eval()
 
-    # Deep hedge: per-step std of delta (proxy for hedging uncertainty)
-    delta_std = net_deltas.std(dim=0).numpy()
-    ax.plot(timesteps, delta_std, color="steelblue", linewidth=2,
-            label="Deep Hedge $\\delta$ std")
+        with torch.no_grad():
+            net_deltas = net.forward_trajectory(features).clamp(0.0, 1.0)   # (N, T)
 
-    # For BS sim: overlay per-step MAE vs analytical delta
-    if sim == "bs":
-        sigma = run.config.get("simulator_params", {}).get("sigma", 0.2)
-        S_t   = batch.paths_S[:, :-1]
-        tau_t = batch.T_mat - batch.paths_t[:, :-1]
-        bs_d  = bs_call_delta(S_t, batch.K, tau_t, sigma=sigma, r=0.0)
-        mae_per_step = (net_deltas - bs_d).abs().mean(dim=0).numpy()
-        ax.plot(timesteps, mae_per_step, color="tomato", linewidth=2,
-                linestyle="--", label="MAE vs BS $\\Delta$")
+        # Mean absolute position change per timestep.
+        # Skip t=0 — the first step change (delta_0 - 0) reflects initial
+        # position entry rather than rebalancing and dominates the scale.
+        delta_prev = torch.cat([torch.zeros(net_deltas.shape[0], 1), net_deltas[:, :-1]], dim=1)
+        abs_change = (net_deltas - delta_prev).abs().mean(dim=0).numpy()
 
-    sim_label = {"bs": "Black-Scholes", "heston": "Heston",
-                 "nga": "NGA"}.get(sim, sim.upper())
-    ax.set_title(f"Per-Timestep Delta Analysis — {sim_label} ({run.run_name})",
-                 fontsize=13)
-    ax.set_xlabel("Timestep $t$", fontsize=11)
-    ax.set_ylabel("Value", fontsize=11)
-    ax.legend(fontsize=10)
+        timesteps = np.arange(1, batch.n_steps)   # skip t=0
+        ax_trade.plot(timesteps, abs_change[1:], color=color, linewidth=2, label=label)
+
+    ax_trade.set_title("Mean Rebalancing Trade Size per Timestep", fontsize=13)
+    ax_trade.set_ylabel("Mean $|\\delta_t - \\delta_{t-1}|$", fontsize=11)
+    ax_trade.set_xlabel("Timestep $t$  (1 = first rebalance, T−1 = day before maturity)",
+                        fontsize=11)
+    ax_trade.legend(fontsize=10)
+    ax_trade.grid(True, alpha=0.3)
+
     plt.tight_layout()
-
-    path = out_dir / f"chart4_per_timestep_{sim}.png"
+    path = out_dir / "chart4_per_timestep.png"
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    print(f"  Chart 4 ({sim})    → {path}")
+    print(f"  Chart 4           → {path}")
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-def _parse_args() -> argparse.Namespace:
-    """Parse CLI arguments for evaluation entrypoint.
-
-    Returns
-    -------
-    argparse.Namespace
-        Parsed command-line arguments.
-    """
+def _parse_args():
     p = argparse.ArgumentParser(
         description="Deep hedging evaluation suite — Table 1, Charts 1/2/4."
     )

@@ -1,8 +1,7 @@
 # Deep Hedging — Comparative Study in Incomplete Markets
 
 **Thesis:** A Comparative Study of Deep Hedging Methods in Incomplete Markets  
-**Author:** Lucian Densmore | UMass Amherst | Spring 2026  
-**Advisor:** [Advisor Name]  
+**Author:** Lucian Densmore | UMass Amherst | Spring 2026   
 **License:** MIT
 
 ---

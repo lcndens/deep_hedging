@@ -510,8 +510,6 @@ Mean absolute position change `mean(|δ_t − δ_{t-1}|)` per timestep for all r
 
 ## 6. Extension Map
 
-Each Aim 3 framework modifies at most one or two modules. All other modules are shared unchanged.
-
 | Framework | Module(s) Changed | Change Description |
 |---|---|---|
 | No-Transaction Band (Imaki 2021) | `policy/` | Network outputs `(b_lower, b_upper)` bands; delta = clamp(delta_{t-1}, bl, bu) |

@@ -1,8 +1,40 @@
-"""Training loop for deep-hedging policy optimization.
+"""Training loop for deep hedging — Stage 5.
 
-This module trains the baseline feedforward hedge policy against the CVaR OCE
-objective, evaluates on a validation split each epoch, and persists checkpoints
-plus logs for downstream evaluation.
+Trains a BaselineFeedforwardNetwork to minimise CVaR via the OCE objective.
+Supports all three simulators (BS, Heston, NGA) with optional proportional
+transaction costs.
+
+Hyperparameters (matching Buehler et al. 2019 / He et al. 2025):
+    batch_size  = 10,000
+    n_epochs    = 500
+    lr          = 1e-3
+    early_stop  = 50 epochs patience on validation CVaR
+    epsilon     = 0.0  (no transaction costs by default)
+    alpha       = 0.95 (CVaR confidence level)
+
+Output directory layout:
+    results/runs/<sim>/<run_id>/
+        checkpoints/
+            best_model.pt       ← best validation checkpoint
+            final_model.pt      ← last epoch checkpoint
+        logs/
+            train_log.csv       ← epoch, train_loss, val_loss, omega
+        config.json             ← full experiment configuration
+
+Usage (CLI):
+    python -m src.train.trainer \\
+        --dataset_dir  data/datasets/v1.0/bs/<run_id> \\
+        --sim          bs \\
+        --epsilon      0.0 \\
+        --n_epochs     500 \\
+        --lr           1e-3 \\
+        --batch_size   10000 \\
+        --alpha        0.95 \\
+        --seed         42
+
+Usage (Python API):
+    from src.train.trainer import train
+    results = train(cfg)
 """
 
 from __future__ import annotations
@@ -25,6 +57,7 @@ from src.frictions.proportional import proportional_cost
 from src.pnl.compute import compute_pnl
 from src.policy.baseline_feedforward_network import BaselineFeedforwardNetwork
 from src.objective_functions.cvar import CVaRLoss
+from src.objective_functions.mean_variance import MeanVarianceLoss
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +85,13 @@ class TrainConfig:
     batch_size : int
         Mini-batch size. Must be <= n_train_paths.
     alpha : float
-        CVaR confidence level in [0, 1).
+        CVaR confidence level in [0, 1). Only used when objective="cvar".
+    lam : float
+        Risk-aversion coefficient λ for mean-variance objective. Only used
+        when objective="mean_variance". Default: 1.0.
+    objective : str
+        Risk objective to minimise. One of "cvar" or "mean_variance".
+        Default: "cvar".
     hidden : int
         Hidden layer size for BaselineFeedforwardNetwork.
     early_stop_patience : int
@@ -73,6 +112,8 @@ class TrainConfig:
     lr:                   float     = 1e-3
     batch_size:           int       = 10_000
     alpha:                float     = 0.95
+    lam:                  float     = 1.0
+    objective:            str       = "cvar"
     hidden:               int       = 64
     early_stop_patience:  int       = 50
     seed:                 int       = 42
@@ -87,25 +128,7 @@ class TrainConfig:
 
 @dataclass
 class TrainResult:
-    """Summary statistics and output location for a training run.
-
-    Parameters
-    ----------
-    run_dir : Path
-        Directory containing checkpoints, logs, and configuration.
-    best_val_loss : float
-        Lowest validation loss observed during training.
-    best_epoch : int
-        Epoch index where ``best_val_loss`` was achieved.
-    final_train_loss : float
-        Training loss from the final processed epoch.
-    final_val_loss : float
-        Validation loss from the final processed epoch.
-    n_epochs_trained : int
-        Number of epochs actually executed.
-    stopped_early : bool
-        Whether early stopping terminated the run before ``cfg.n_epochs``.
-    """
+    """Summary of a completed training run."""
     run_dir:          Path
     best_val_loss:    float
     best_epoch:       int
@@ -125,12 +148,10 @@ def train(cfg: TrainConfig) -> TrainResult:
     Parameters
     ----------
     cfg : TrainConfig
-        Full training configuration.
 
     Returns
     -------
     TrainResult
-        Aggregated run outputs and final metrics.
     """
     # --- Setup ---
     _set_seed(cfg.seed)
@@ -169,13 +190,16 @@ def train(cfg: TrainConfig) -> TrainResult:
     T_mat = train_batch.T_mat
 
     # --- Build model and objective ---
-    net  = BaselineFeedforwardNetwork(hidden=cfg.hidden).to(device)
-    cvar = CVaRLoss(alpha=cfg.alpha).to(device)
+    net       = BaselineFeedforwardNetwork(hidden=cfg.hidden).to(device)
+    objective = _build_objective(cfg).to(device)
 
-    optimizer = torch.optim.Adam(
-        [*net.parameters(), cvar.omega],
-        lr=cfg.lr,
-    )
+    # Include objective.omega in optimizer only if it is a trainable Parameter
+    # (CVaR has a trainable omega; mean-variance does not).
+    opt_params = list(net.parameters())
+    if isinstance(objective.omega, nn.Parameter):
+        opt_params.append(objective.omega)
+
+    optimizer = torch.optim.Adam(opt_params, lr=cfg.lr)
 
     logger.info(f"Network parameters: {net.n_parameters():,}")
 
@@ -188,13 +212,15 @@ def train(cfg: TrainConfig) -> TrainResult:
     best_epoch = 0
     patience   = 0
 
+    N_train = train_batch.n_paths
+
     for epoch in range(1, cfg.n_epochs + 1):
         t0 = time.time()
 
         # -- Train --
         net.train()
         train_loss = _run_epoch(
-            net, cvar, optimizer,
+            net, objective, optimizer,
             train_features, train_S,
             K, cfg.epsilon, cfg.batch_size,
             training=True,
@@ -204,14 +230,14 @@ def train(cfg: TrainConfig) -> TrainResult:
         net.eval()
         with torch.no_grad():
             val_loss = _run_epoch(
-                net, cvar, optimizer,
+                net, objective, optimizer,
                 val_features, val_S,
                 K, cfg.epsilon, val_batch.n_paths,   # full val set
                 training=False,
             )
 
         elapsed = time.time() - t0
-        omega   = cvar.omega.item()
+        omega   = objective.omega.item() if isinstance(objective.omega, nn.Parameter) else float("nan")
 
         log_rows.append({
             "epoch":      epoch,
@@ -222,10 +248,11 @@ def train(cfg: TrainConfig) -> TrainResult:
         })
 
         if epoch % 10 == 0 or epoch == 1:
+            omega_str = f"ω={omega:.4f} | " if not isinstance(omega, float) or not (omega != omega) else ""
             logger.info(
                 f"Epoch {epoch:4d}/{cfg.n_epochs} | "
                 f"train={train_loss:.4f} | val={val_loss:.4f} | "
-                f"ω={omega:.4f} | {elapsed:.1f}s"
+                f"{omega_str}{elapsed:.1f}s"
             )
 
         # -- Checkpoint best model --
@@ -233,7 +260,7 @@ def train(cfg: TrainConfig) -> TrainResult:
             best_val   = val_loss
             best_epoch = epoch
             patience   = 0
-            _save_checkpoint(net, cvar, optimizer, epoch, run_dir, name="best_model")
+            _save_checkpoint(net, objective, optimizer, epoch, run_dir, name="best_model")
         else:
             patience += 1
 
@@ -243,7 +270,7 @@ def train(cfg: TrainConfig) -> TrainResult:
                 f"Early stopping at epoch {epoch} "
                 f"(no improvement for {cfg.early_stop_patience} epochs)"
             )
-            _save_checkpoint(net, cvar, optimizer, epoch, run_dir, name="final_model")
+            _save_checkpoint(net, objective, optimizer, epoch, run_dir, name="final_model")
             _save_log(log_rows, run_dir)
             return TrainResult(
                 run_dir          = run_dir,
@@ -256,7 +283,7 @@ def train(cfg: TrainConfig) -> TrainResult:
             )
 
     # -- Save final model if not early stopped --
-    _save_checkpoint(net, cvar, optimizer, cfg.n_epochs, run_dir, name="final_model")
+    _save_checkpoint(net, objective, optimizer, cfg.n_epochs, run_dir, name="final_model")
     _save_log(log_rows, run_dir)
 
     logger.info(
@@ -278,9 +305,22 @@ def train(cfg: TrainConfig) -> TrainResult:
 # Private helpers
 # ---------------------------------------------------------------------------
 
+def _build_objective(cfg: TrainConfig) -> nn.Module:
+    """Instantiate the risk objective from config."""
+    if cfg.objective == "cvar":
+        return CVaRLoss(alpha=cfg.alpha)
+    elif cfg.objective == "mean_variance":
+        return MeanVarianceLoss(lam=cfg.lam)
+    else:
+        raise ValueError(
+            f"Unknown objective '{cfg.objective}'. "
+            "Choose 'cvar' or 'mean_variance'."
+        )
+
+
 def _run_epoch(
     net:        BaselineFeedforwardNetwork,
-    cvar:       CVaRLoss,
+    objective:  nn.Module,
     optimizer:  torch.optim.Optimizer,
     features:   torch.Tensor,
     paths_S:    torch.Tensor,
@@ -297,31 +337,10 @@ def _run_epoch(
 
     For eval, runs the full dataset in one forward pass with no_grad.
 
-    Parameters
-    ----------
-    net : BaselineFeedforwardNetwork
-        Hedge policy network.
-    cvar : CVaRLoss
-        CVaR objective module containing trainable ``omega``.
-    optimizer : torch.optim.Optimizer
-        Optimizer used during training mode.
-    features : torch.Tensor
-        Feature tensor with shape ``(N, T, 3)``.
-    paths_S : torch.Tensor
-        Spot paths with shape ``(N, T+1)``.
-    K : float
-        Strike price.
-    epsilon : float
-        Proportional transaction-cost rate.
-    batch_size : int
-        Minibatch size used when ``training=True``.
-    training : bool
-        If ``True``, perform gradient updates. Otherwise run evaluation only.
-
     Returns
     -------
     float
-        Mean CVaR loss across all batches for this epoch.
+        Mean loss across all batches for this epoch.
     """
     N = features.shape[0]
 
@@ -331,7 +350,7 @@ def _run_epoch(
         payoff     = call_payoff(paths_S[:, -1], K)
         total_cost = proportional_cost(paths_S[:, :-1], deltas, epsilon=epsilon)
         pnl        = compute_pnl(paths_S, deltas, payoff, total_cost)
-        return cvar(pnl).item()
+        return objective(pnl).item()
 
     # Training: shuffle and iterate through all mini-batches
     perm       = torch.randperm(N, device=features.device)
@@ -348,7 +367,7 @@ def _run_epoch(
         payoff     = call_payoff(S_b[:, -1], K)
         total_cost = proportional_cost(S_b[:, :-1], deltas, epsilon=epsilon)
         pnl        = compute_pnl(S_b, deltas, payoff, total_cost)
-        loss       = cvar(pnl)
+        loss       = objective(pnl)
         loss.backward()
         optimizer.step()
 
@@ -359,49 +378,18 @@ def _run_epoch(
 
 
 def _set_seed(seed: int) -> None:
-    """Set random seeds for reproducible torch operations.
-
-    Parameters
-    ----------
-    seed : int
-        Seed value applied to CPU and CUDA generators.
-    """
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
 
 def _resolve_device(device: str) -> torch.device:
-    """Resolve target torch device from configuration.
-
-    Parameters
-    ----------
-    device : str
-        Device string. ``"auto"`` selects CUDA when available.
-
-    Returns
-    -------
-    torch.device
-        Resolved device instance.
-    """
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
 
 
 def _make_run_dir(cfg: TrainConfig) -> Path:
-    """Create and return the output directory for a training run.
-
-    Parameters
-    ----------
-    cfg : TrainConfig
-        Training configuration containing simulator, run id, and output root.
-
-    Returns
-    -------
-    Path
-        Run directory path with ``checkpoints/`` and ``logs/`` created.
-    """
     if cfg.run_id is None:
         ts     = time.strftime("%Y%m%d_%H%M%S")
         run_id = f"{ts}_{cfg.sim}_eps-{cfg.epsilon}_seed-{cfg.seed}"
@@ -415,13 +403,6 @@ def _make_run_dir(cfg: TrainConfig) -> Path:
 
 
 def _setup_logging(run_dir: Path) -> None:
-    """Configure logging handlers for console and file output.
-
-    Parameters
-    ----------
-    run_dir : Path
-        Run directory containing the ``logs`` folder.
-    """
     log_path = run_dir / "logs" / "train.log"
     logging.basicConfig(
         level   = logging.INFO,
@@ -434,15 +415,6 @@ def _setup_logging(run_dir: Path) -> None:
 
 
 def _save_config(cfg: TrainConfig, run_dir: Path) -> None:
-    """Write the resolved training configuration to ``config.json``.
-
-    Parameters
-    ----------
-    cfg : TrainConfig
-        Training configuration to persist.
-    run_dir : Path
-        Output run directory.
-    """
     config_path = run_dir / "config.json"
     with open(config_path, "w") as f:
         json.dump(asdict(cfg), f, indent=2)
@@ -450,48 +422,22 @@ def _save_config(cfg: TrainConfig, run_dir: Path) -> None:
 
 def _save_checkpoint(
     net:       BaselineFeedforwardNetwork,
-    cvar:      CVaRLoss,
+    objective: nn.Module,
     optimizer: torch.optim.Optimizer,
     epoch:     int,
     run_dir:   Path,
     name:      str,
 ) -> None:
-    """Persist model, objective, and optimizer state to disk.
-
-    Parameters
-    ----------
-    net : BaselineFeedforwardNetwork
-        Trained policy network.
-    cvar : CVaRLoss
-        Objective module containing ``omega`` state.
-    optimizer : torch.optim.Optimizer
-        Optimizer state to checkpoint.
-    epoch : int
-        Epoch number at save time.
-    run_dir : Path
-        Output run directory.
-    name : str
-        Checkpoint stem name (for example ``"best_model"``).
-    """
     path = run_dir / "checkpoints" / f"{name}.pt"
     torch.save({
         "epoch":            epoch,
         "model_state_dict": net.state_dict(),
-        "cvar_state_dict":  cvar.state_dict(),
+        "objective_state":  objective.state_dict(),
         "optimizer_state":  optimizer.state_dict(),
     }, path)
 
 
 def _save_log(rows: list[dict], run_dir: Path) -> None:
-    """Write epoch-level training metrics to CSV.
-
-    Parameters
-    ----------
-    rows : list[dict]
-        Sequence of per-epoch metric dictionaries.
-    run_dir : Path
-        Output run directory.
-    """
     import csv
     path = run_dir / "logs" / "train_log.csv"
     if not rows:
@@ -507,13 +453,6 @@ def _save_log(rows: list[dict], run_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> TrainConfig:
-    """Parse CLI arguments into a ``TrainConfig`` object.
-
-    Returns
-    -------
-    TrainConfig
-        Configuration populated from command-line arguments.
-    """
     p = argparse.ArgumentParser(description="Train a deep hedging network.")
     p.add_argument("--dataset_dir",         required=True)
     p.add_argument("--run_name",            required=True,
@@ -527,6 +466,11 @@ def _parse_args() -> TrainConfig:
     p.add_argument("--hidden",              type=int,   default=64)
     p.add_argument("--early_stop_patience", type=int,   default=50)
     p.add_argument("--seed",                type=int,   default=42)
+    p.add_argument("--objective",            default="cvar",
+                   choices=["cvar", "mean_variance"],
+                   help="Risk objective: 'cvar' or 'mean_variance'")
+    p.add_argument("--lam",                  type=float, default=1.0,
+                   help="Risk-aversion λ for mean_variance objective")
     p.add_argument("--out_root",            default="results/runs")
     p.add_argument("--device",              default="auto")
 

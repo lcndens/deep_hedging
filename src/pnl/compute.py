@@ -3,6 +3,15 @@
 This module implements the per-path terminal profit-and-loss identity used by
 the training objective, consistent with Buehler et al. (2019, eq. 2.1):
 ``PnL_i = p0 + sum_t delta_t (S_{t+1} - S_t) - C_T - payoff(S_T)``.
+
+Single-instrument:
+    paths_S  (N, T+1)  — spot prices
+    deltas   (N, T)    — hedge ratios
+
+Two-instrument:
+    paths_prices  (N, T+1, I)  — stacked instrument prices
+    deltas        (N, T, I)    — stacked hedge ratios
+    Gains sum over both the time and instrument axes.
 """
 
 from __future__ import annotations
@@ -26,10 +35,11 @@ def compute_pnl(
     Parameters
     ----------
     paths_S : torch.Tensor
-        Spot-price paths with shape ``(N, T+1)``, where ``N`` is the number of
-        simulated paths and ``T`` is the number of hedging timesteps.
+        Single-instrument: spot-price paths ``(N, T+1)``.
+        Two-instrument:    stacked prices ``(N, T+1, I)`` where ``I=2``.
     deltas : torch.Tensor
-        Hedge ratios ``delta_t`` with shape ``(N, T)``.
+        Single-instrument: hedge ratios ``(N, T)``.
+        Two-instrument:    stacked deltas ``(N, T, I)``.
     payoff : torch.Tensor, shape (N,)
         Terminal option payoff ``payoff(S_T)`` per path.
     total_cost : torch.Tensor, shape (N,)
@@ -44,21 +54,22 @@ def compute_pnl(
         Terminal PnL tensor with shape ``(N,)`` on the same device as
         ``paths_S``.
 
-    Notes
-    -----
-    The increment term uses ``paths_S[:, 1:] - paths_S[:, :-1]`` so price
-    changes are aligned with ``deltas[:, t]`` for ``t = 0, ..., T-1``.
-
     Raises
     ------
     ValueError
-        If tensor shapes are inconsistent.
+        If tensor shapes are inconsistent or ndim combinations are invalid.
     """
     _validate_inputs(paths_S, deltas, payoff, total_cost)
 
-    # Aligns delta_t with the corresponding price increment S_{t+1} - S_t.
-    price_increments = paths_S[:, 1:] - paths_S[:, :-1]
-    gains = (deltas * price_increments).sum(dim=1)
+    # Price increments aligned with delta_t for t = 0, ..., T-1.
+    price_increments = paths_S[:, 1:] - paths_S[:, :-1]   # (N, T) or (N, T, I)
+
+    if deltas.ndim == 2:
+        # Single-instrument: sum over T.
+        gains = (deltas * price_increments).sum(dim=1)
+    else:
+        # Two-instrument: sum over T and I.
+        gains = (deltas * price_increments).sum(dim=(1, 2))
 
     pnl = p0 + gains - total_cost - payoff
     return pnl
@@ -79,9 +90,9 @@ def _validate_inputs(
     Parameters
     ----------
     paths_S : torch.Tensor
-        Spot paths with expected shape ``(N, T+1)``.
+        ``(N, T+1)`` for single-instrument or ``(N, T+1, I)`` for multi.
     deltas : torch.Tensor
-        Hedge ratios with expected shape ``(N, T)``.
+        ``(N, T)`` for single-instrument or ``(N, T, I)`` for multi.
     payoff : torch.Tensor
         Terminal payoff vector with expected shape ``(N,)``.
     total_cost : torch.Tensor
@@ -92,18 +103,25 @@ def _validate_inputs(
     ValueError
         If any tensor has an incompatible rank or shape.
     """
-    if paths_S.ndim != 2:
+    if paths_S.ndim not in (2, 3):
         raise ValueError(
-            f"paths_S must be 2-D (N, T+1), got shape {tuple(paths_S.shape)}."
+            f"paths_S must be 2-D (N, T+1) or 3-D (N, T+1, I), "
+            f"got shape {tuple(paths_S.shape)}."
         )
-    if deltas.ndim != 2:
+    if deltas.ndim not in (2, 3):
         raise ValueError(
-            f"deltas must be 2-D (N, T), got shape {tuple(deltas.shape)}."
+            f"deltas must be 2-D (N, T) or 3-D (N, T, I), "
+            f"got shape {tuple(deltas.shape)}."
+        )
+    if paths_S.ndim != deltas.ndim:
+        raise ValueError(
+            f"paths_S and deltas must have the same number of dimensions, "
+            f"got paths_S.ndim={paths_S.ndim} and deltas.ndim={deltas.ndim}."
         )
 
-    N = paths_S.shape[0]
+    N      = paths_S.shape[0]
     T_plus = paths_S.shape[1]
-    T = deltas.shape[1]
+    T      = deltas.shape[1]
 
     if T_plus != T + 1:
         raise ValueError(
@@ -113,6 +131,11 @@ def _validate_inputs(
     if deltas.shape[0] != N:
         raise ValueError(
             f"paths_S has N={N} paths but deltas has N={deltas.shape[0]}."
+        )
+    if deltas.ndim == 3 and paths_S.shape[2] != deltas.shape[2]:
+        raise ValueError(
+            f"paths_S instrument dim {paths_S.shape[2]} does not match "
+            f"deltas instrument dim {deltas.shape[2]}."
         )
     if payoff.shape != (N,):
         raise ValueError(

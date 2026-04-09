@@ -30,3 +30,10 @@ CONTRACTS_SCHEMA = pa.schema([
     ("strike", pa.float32()),
     ("maturity_years", pa.float32()),
 ])
+
+# Variance swap price path; written only for Heston datasets.
+VARIANCE_SWAP_SCHEMA = pa.schema([
+    ("path_id", pa.int64()),
+    ("t_idx",   pa.int32()),
+    ("S2",      pa.float32()),
+])

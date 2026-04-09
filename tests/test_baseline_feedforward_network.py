@@ -368,7 +368,7 @@ class TestValidation:
 
     def test_wrong_feature_dim_raises(self, net):
         """Assert wrong feature dim raises."""
-        with pytest.raises(ValueError, match="FEATURE_DIM"):
+        with pytest.raises(ValueError, match="features last dim"):
             net.forward_trajectory(torch.randn(N, T, 5))   # F=5 instead of 3
 
     def test_nan_input_raises(self, net):

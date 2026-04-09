@@ -16,7 +16,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import torch
 
-from src.schema.v1_0 import OBS_SCHEMA, CONTRACTS_SCHEMA, LATENT_STATE_SCHEMA
+from src.schema.v1_0 import OBS_SCHEMA, CONTRACTS_SCHEMA, LATENT_STATE_SCHEMA, VARIANCE_SWAP_SCHEMA
 
 # ---------------------------------------------------------------------------
 # Return type
@@ -35,6 +35,9 @@ class DatasetBatch:
         For BS and NGA, this is identically zero.
     paths_t : torch.Tensor
         Time-grid tensor with shape ``(N, T+1)`` and dtype ``float32``.
+    paths_S2 : torch.Tensor
+        Variance swap price path with shape ``(N, T+1)`` and dtype ``float32``.
+        Non-zero only for Heston datasets; zero elsewhere.
     K : float
         Option strike price.
     T_mat : float
@@ -50,6 +53,7 @@ class DatasetBatch:
     paths_S:  torch.Tensor
     paths_v:  torch.Tensor
     paths_t:  torch.Tensor
+    paths_S2: torch.Tensor
     K:        float
     T_mat:    float
     n_paths:  int
@@ -105,9 +109,17 @@ def load_dataset(run_dir: Path | str, split: str) -> DatasetBatch:
     lat_path = run_dir / "latent_state" / split / "part-00000.parquet"
     lat = _load_latent_state(lat_path, obs)
 
-    # Join variance column onto observations by path/time index.
+    # Variance swap is only written for Heston; fallback returns zeros.
+    vs_path = run_dir / "variance_swap" / split / "part-00000.parquet"
+    vs = _load_variance_swap(vs_path, obs)
+
+    # Join all columns onto observations by path/time index.
     merged = obs.merge(
         lat[["path_id", "t_idx", "v"]],
+        on=["path_id", "t_idx"],
+        how="left",
+    ).merge(
+        vs[["path_id", "t_idx", "S2"]],
         on=["path_id", "t_idx"],
         how="left",
     )
@@ -125,9 +137,10 @@ def load_dataset(run_dir: Path | str, split: str) -> DatasetBatch:
     N = n_rows // T1
 
     # Pivot long tables to dense path matrices.
-    S_arr = merged["S"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
-    v_arr = merged["v"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
-    t_arr = merged["t_years"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
+    S_arr  = merged["S"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
+    v_arr  = merged["v"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
+    t_arr  = merged["t_years"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
+    S2_arr = merged["S2"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
 
     # Validate basic numerical invariants before tensor conversion.
     _check_tensors(S_arr, v_arr, t_arr, T_mat, metadata, run_dir)
@@ -137,6 +150,7 @@ def load_dataset(run_dir: Path | str, split: str) -> DatasetBatch:
         paths_S  = torch.from_numpy(S_arr),
         paths_v  = torch.from_numpy(v_arr),
         paths_t  = torch.from_numpy(t_arr),
+        paths_S2 = torch.from_numpy(S2_arr),
         K        = K,
         T_mat    = T_mat,
         n_paths  = N,
@@ -339,6 +353,35 @@ def _load_latent_state(lat_path: Path, obs: pd.DataFrame) -> pd.DataFrame:
         "path_id": obs["path_id"].to_numpy(),
         "t_idx":   obs["t_idx"].to_numpy(),
         "v":       np.zeros(len(obs), dtype=np.float32),
+    })
+
+
+def _load_variance_swap(vs_path: Path, obs: pd.DataFrame) -> pd.DataFrame:
+    """Load variance swap data or construct a zero fallback.
+
+    Parameters
+    ----------
+    vs_path : Path
+        Expected variance-swap parquet file path
+        (``run_dir/variance_swap/<split>/part-00000.parquet``).
+    obs : pd.DataFrame
+        Observations table used for path/time indices in fallback mode.
+
+    Returns
+    -------
+    pd.DataFrame
+        Variance-swap table with columns ``path_id``, ``t_idx``, and ``S2``.
+        Returns zeros when the ``variance_swap/`` directory is absent (i.e.
+        for BS and NGA datasets).
+    """
+    if vs_path.exists():
+        return _read_parquet(vs_path, VARIANCE_SWAP_SCHEMA)
+
+    # Zero fallback for simulators that do not produce a variance swap path.
+    return pd.DataFrame({
+        "path_id": obs["path_id"].to_numpy(),
+        "t_idx":   obs["t_idx"].to_numpy(),
+        "S2":      np.zeros(len(obs), dtype=np.float32),
     })
 
 

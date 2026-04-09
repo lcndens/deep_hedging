@@ -21,7 +21,7 @@ from src.pnl.compute import compute_pnl
 from src.io.dataset_loader import load_dataset
 from src.generate_dataset import main as generate_dataset
 
-from tests.conftest import N_PATHS, N_STEPS, T1
+from tests.conftest import N_PATHS, N_STEPS, T1, SEED
 
 def _gen(tmp_path: Path, sim: str) -> Path:
     """Helper for gen."""

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from src.simulators.variance_swap import compute_variance_swap_paths
+
 
 @dataclass(frozen=True)
 class HestonParams:
@@ -60,7 +62,7 @@ class HestonParams:
     seed: int = 42
 
 
-def simulate_observations(cfg: HestonParams) -> tuple[pd.DataFrame, pd.DataFrame]:
+def simulate_observations(cfg: HestonParams) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Simulate Heston spot/variance paths and return canonical tables.
 
     Parameters
@@ -70,10 +72,11 @@ def simulate_observations(cfg: HestonParams) -> tuple[pd.DataFrame, pd.DataFrame
 
     Returns
     -------
-    tuple[pd.DataFrame, pd.DataFrame]
-        Two long-format tables:
-        ``observations`` with ``path_id, t_idx, t_years, S`` and
-        ``latent_state`` with ``path_id, t_idx, v``.
+    tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
+        Three long-format tables:
+        ``observations`` with ``path_id, t_idx, t_years, S``;
+        ``latent_state`` with ``path_id, t_idx, v``; and
+        ``variance_swap`` with ``path_id, t_idx, S2``.
 
     Notes
     -----
@@ -157,4 +160,12 @@ def simulate_observations(cfg: HestonParams) -> tuple[pd.DataFrame, pd.DataFrame
     latent_df["t_idx"] = latent_df["t_idx"].astype("int32")
     latent_df["v"] = latent_df["v"].astype("float32")
 
-    return df, latent_df
+    # Variance swap price path: realized integral + analytic expected future variance.
+    S2 = compute_variance_swap_paths(v, cfg.kappa, cfg.theta, cfg.maturity_years)
+    S2_long = S2.astype(np.float32).reshape(-1)
+    variance_swap_df = pd.DataFrame({"path_id": path_id, "t_idx": t_idx, "S2": S2_long})
+    variance_swap_df["path_id"] = variance_swap_df["path_id"].astype("int64")
+    variance_swap_df["t_idx"] = variance_swap_df["t_idx"].astype("int32")
+    variance_swap_df["S2"] = variance_swap_df["S2"].astype("float32")
+
+    return df, latent_df, variance_swap_df

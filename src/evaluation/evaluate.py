@@ -41,6 +41,7 @@ import numpy as np
 from src.io.dataset_loader import load_dataset, DatasetBatch
 from src.state.builder import build_features
 from src.derivatives.european import call_payoff
+from src.derivatives.barrier import compute_barrier_payoff
 from src.frictions.proportional import proportional_cost
 from src.pnl.compute import compute_pnl
 from src.policy.baseline_feedforward_network import BaselineFeedforwardNetwork
@@ -135,27 +136,31 @@ def _load_run(run_dir: Path) -> RunInfo:
     with open(run_dir / "config.json") as f:
         config = json.load(f)
 
-    sim         = config["sim"]
-    dataset_dir = Path(config["dataset_dir"])
-    hidden      = config.get("hidden", 64)
-    epsilon     = config.get("epsilon", 0.0)
-    alpha       = config.get("alpha", 0.95)
-    objective   = config.get("objective", "cvar")
+    sim          = config["sim"]
+    dataset_dir  = Path(config["dataset_dir"])
+    hidden       = config.get("hidden", 64)
+    epsilon      = config.get("epsilon", 0.0)
+    alpha        = config.get("alpha", 0.95)
+    objective    = config.get("objective", "cvar")
+    instrument    = config.get("instrument", "single")
+    n_instruments = 2 if instrument == "multi" else 1
+    payoff_type   = config.get("payoff", "european")
+    barrier_level = config.get("barrier", None)
 
-    print(f"Loading run: {run_name}  (sim={sim}, objective={objective})")
+    print(f"Loading run: {run_name}  (sim={sim}, objective={objective}, instrument={instrument}, payoff={payoff_type})")
 
     # Dataset — test split
     batch = load_dataset(dataset_dir, split="test")
 
     # Features
-    features = build_features(batch)
+    features = build_features(batch, n_instruments=n_instruments)
 
     # Load network
     ckpt_path = run_dir / "checkpoints" / "best_model.pt"
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
-    net = BaselineFeedforwardNetwork(hidden=hidden)
+    net = BaselineFeedforwardNetwork(hidden=hidden, n_instruments=n_instruments)
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     net.load_state_dict(ckpt["model_state_dict"])
     net.eval()
@@ -163,15 +168,33 @@ def _load_run(run_dir: Path) -> RunInfo:
     # Deep hedge PnL
     with torch.no_grad():
         deltas = net.forward_trajectory(features)
-        # Clamp deltas to [0, 1] — call option delta is bounded by definition.
-        # Rare extreme values on tail paths indicate network extrapolation failure
-        # and are clamped here to prevent them distorting evaluation metrics.
-        deltas     = deltas.clamp(0.0, 1.0)
-        payoff     = call_payoff(batch.paths_S[:, -1], batch.K)
-        total_cost = proportional_cost(
-            batch.paths_S[:, :-1], deltas, epsilon=epsilon
-        )
-        pnl = compute_pnl(batch.paths_S, deltas, payoff, total_cost)
+
+        # Clamp spot-delta to [0, 1] for European calls only — the delta of a
+        # vanilla call is bounded in [0, 1] by definition.  For barrier options
+        # the delta can be negative near the barrier, so no clamping is applied.
+        # The variance-swap delta (instrument 1) is always unbounded.
+        if payoff_type == "european":
+            if n_instruments == 1:
+                deltas = deltas.clamp(0.0, 1.0)
+            else:
+                deltas = torch.cat(
+                    [deltas[:, :, :1].clamp(0.0, 1.0), deltas[:, :, 1:]], dim=-1
+                )
+
+        if payoff_type == "barrier":
+            # Barrier check uses the spot path only
+            spot_paths = batch.paths_S   # (N, T+1)
+            payoff = compute_barrier_payoff(spot_paths, batch.K, barrier_level)
+        else:
+            payoff = call_payoff(batch.paths_S[:, -1], batch.K)
+
+        if n_instruments == 2:
+            paths_prices = torch.stack([batch.paths_S, batch.paths_S2], dim=-1)
+            total_cost   = proportional_cost(paths_prices[:, :-1], deltas, epsilon=epsilon)
+            pnl          = compute_pnl(paths_prices, deltas, payoff, total_cost)
+        else:
+            total_cost = proportional_cost(batch.paths_S[:, :-1], deltas, epsilon=epsilon)
+            pnl        = compute_pnl(batch.paths_S, deltas, payoff, total_cost)
 
     # BS analytical delta PnL — shown for all BS runs to benchmark friction impact
     bs_pnl = None
@@ -425,39 +448,51 @@ def _plot_per_timestep_error(runs: list[RunInfo], out_dir: Path) -> None:
         print("  matplotlib not available — skipping Chart 4")
         return
 
-    sim_labels = {"bs": "Black-Scholes", "heston": "Heston", "nga": "NGA"}
-    colors     = {"bs": "steelblue", "heston": "seagreen", "nga": "darkorange"}
+    sim_labels  = {"bs": "Black-Scholes", "heston": "Heston", "nga": "NGA"}
+    color_cycle = ["steelblue", "seagreen", "darkorange", "purple", "tomato",
+                   "teal", "saddlebrown", "crimson", "slategray", "olive"]
 
     fig, ax_trade = plt.subplots(figsize=(10, 5))
 
-    for run in runs:
+    for i, run in enumerate(runs):
         sim         = run.sim.lower()
         dataset_dir = Path(run.config["dataset_dir"])
         hidden      = run.config.get("hidden", 64)
-        color       = colors.get(sim, "gray")
+        color       = color_cycle[i % len(color_cycle)]
         obj_label   = "MV" if run.objective == "mean_variance" else "CVaR"
-        label       = f"{sim_labels.get(sim, sim.upper())} / {obj_label}"
+        instrument  = run.config.get("instrument", "single")
+        instr_label = "+VS" if instrument == "multi" else ""
+        label       = f"{sim_labels.get(sim, sim.upper())}{instr_label} / {obj_label} / {run.run_name}"
         linestyle   = "--" if run.objective == "mean_variance" else "-"
 
+        n_instruments = 2 if instrument == "multi" else 1
+
         batch    = load_dataset(dataset_dir, split="test")
-        features = build_features(batch)
+        features = build_features(batch, n_instruments=n_instruments)
 
         ckpt = torch.load(
             run.run_dir / "checkpoints" / "best_model.pt",
             map_location="cpu", weights_only=True
         )
-        net = BaselineFeedforwardNetwork(hidden=hidden)
+        net = BaselineFeedforwardNetwork(hidden=hidden, n_instruments=n_instruments)
         net.load_state_dict(ckpt["model_state_dict"])
         net.eval()
 
         with torch.no_grad():
-            net_deltas = net.forward_trajectory(features).clamp(0.0, 1.0)   # (N, T)
+            net_deltas = net.forward_trajectory(features)   # (N, T) or (N, T, 2)
+
+        # For multi-instrument, analyse the spot delta (instrument 0) only —
+        # this keeps the per-timestep chart comparable across single and multi runs.
+        spot_deltas = net_deltas[:, :, 0] if n_instruments == 2 else net_deltas
+        spot_deltas = spot_deltas.clamp(0.0, 1.0)   # (N, T)
 
         # Mean absolute position change per timestep.
         # Skip t=0 — the first step change (delta_0 - 0) reflects initial
         # position entry rather than rebalancing and dominates the scale.
-        delta_prev = torch.cat([torch.zeros(net_deltas.shape[0], 1), net_deltas[:, :-1]], dim=1)
-        abs_change = (net_deltas - delta_prev).abs().mean(dim=0).numpy()
+        delta_prev = torch.cat(
+            [torch.zeros(spot_deltas.shape[0], 1), spot_deltas[:, :-1]], dim=1
+        )
+        abs_change = (spot_deltas - delta_prev).abs().mean(dim=0).numpy()
 
         timesteps = np.arange(1, batch.n_steps)   # skip t=0
         ax_trade.plot(timesteps, abs_change[1:], color=color, linewidth=2,

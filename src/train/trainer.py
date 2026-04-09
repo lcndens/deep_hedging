@@ -53,6 +53,7 @@ import torch.nn as nn
 from src.io.dataset_loader import DatasetBatch, load_dataset
 from src.state.builder import build_features
 from src.derivatives.european import call_payoff
+from src.derivatives.barrier import compute_barrier_payoff
 from src.frictions.proportional import proportional_cost
 from src.pnl.compute import compute_pnl
 from src.policy.baseline_feedforward_network import BaselineFeedforwardNetwork
@@ -120,6 +121,9 @@ class TrainConfig:
     out_root:             str       = "results/runs"
     run_id:               Optional[str] = None
     device:               str       = "auto"
+    instrument:           str       = "single"
+    payoff:               str       = "european"
+    barrier:              Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +157,19 @@ def train(cfg: TrainConfig) -> TrainResult:
     -------
     TrainResult
     """
+    # --- Validate instrument / simulator compatibility ---
+    if cfg.instrument == "multi" and cfg.sim != "heston":
+        raise ValueError(
+            f"--instrument multi requires --sim heston, got --sim {cfg.sim}. "
+            "The variance swap price path (paths_S2) is only available for "
+            "Heston datasets."
+        )
+
+    n_instruments = 2 if cfg.instrument == "multi" else 1
+
+    if cfg.payoff == "barrier" and cfg.barrier is None:
+        raise ValueError("--payoff barrier requires --barrier B to be specified.")
+
     # --- Setup ---
     _set_seed(cfg.seed)
     device = _resolve_device(cfg.device)
@@ -176,21 +193,45 @@ def train(cfg: TrainConfig) -> TrainResult:
 
     # --- Pre-compute features (CPU RAM) ---
     logger.info("Building features...")
-    train_features = build_features(train_batch)   # (N_train, T, 3)
-    val_features   = build_features(val_batch)     # (N_val,   T, 3)
+    train_features = build_features(train_batch, n_instruments=n_instruments)
+    val_features   = build_features(val_batch,   n_instruments=n_instruments)
 
     # --- Move full datasets to device ---
     train_features = train_features.to(device)
     val_features   = val_features.to(device)
 
-    train_S = train_batch.paths_S.to(device)
-    val_S   = val_batch.paths_S.to(device)
+    # Stack instrument price paths: (N, T+1) → (N, T+1, I) for multi.
+    if n_instruments == 2:
+        train_S = torch.stack(
+            [train_batch.paths_S, train_batch.paths_S2], dim=-1
+        ).to(device)   # (N, T+1, 2)
+        val_S   = torch.stack(
+            [val_batch.paths_S, val_batch.paths_S2], dim=-1
+        ).to(device)
+    else:
+        train_S = train_batch.paths_S.to(device)   # (N, T+1)
+        val_S   = val_batch.paths_S.to(device)
 
     K     = train_batch.K
     T_mat = train_batch.T_mat
 
+    # --- Build payoff function ---
+    # payoff_fn takes the full paths_S batch ((N, T+1) or (N, T+1, I)) and
+    # returns per-path payoff (N,). Barrier check runs on the spot sub-path.
+    if cfg.payoff == "barrier":
+        _B = cfg.barrier
+        def payoff_fn(S_full: torch.Tensor) -> torch.Tensor:
+            spot = S_full[:, :, 0] if n_instruments == 2 else S_full
+            return compute_barrier_payoff(spot, K, _B)
+    else:
+        def payoff_fn(S_full: torch.Tensor) -> torch.Tensor:
+            S_T = S_full[:, -1, 0] if n_instruments == 2 else S_full[:, -1]
+            return call_payoff(S_T, K)
+
     # --- Build model and objective ---
-    net       = BaselineFeedforwardNetwork(hidden=cfg.hidden).to(device)
+    net = BaselineFeedforwardNetwork(
+        hidden=cfg.hidden, n_instruments=n_instruments
+    ).to(device)
     objective = _build_objective(cfg).to(device)
 
     # Include objective.omega in optimizer only if it is a trainable Parameter
@@ -222,7 +263,9 @@ def train(cfg: TrainConfig) -> TrainResult:
         train_loss = _run_epoch(
             net, objective, optimizer,
             train_features, train_S,
-            K, cfg.epsilon, cfg.batch_size,
+            cfg.epsilon, cfg.batch_size,
+            payoff_fn,
+            n_instruments=n_instruments,
             training=True,
         )
 
@@ -232,7 +275,9 @@ def train(cfg: TrainConfig) -> TrainResult:
             val_loss = _run_epoch(
                 net, objective, optimizer,
                 val_features, val_S,
-                K, cfg.epsilon, val_batch.n_paths,   # full val set
+                cfg.epsilon, val_batch.n_paths,   # full val set
+                payoff_fn,
+                n_instruments=n_instruments,
                 training=False,
             )
 
@@ -319,15 +364,16 @@ def _build_objective(cfg: TrainConfig) -> nn.Module:
 
 
 def _run_epoch(
-    net:        BaselineFeedforwardNetwork,
-    objective:  nn.Module,
-    optimizer:  torch.optim.Optimizer,
-    features:   torch.Tensor,
-    paths_S:    torch.Tensor,
-    K:          float,
-    epsilon:    float,
-    batch_size: int,
-    training:   bool,
+    net:           BaselineFeedforwardNetwork,
+    objective:     nn.Module,
+    optimizer:     torch.optim.Optimizer,
+    features:      torch.Tensor,
+    paths_S:       torch.Tensor,
+    epsilon:       float,
+    batch_size:    int,
+    payoff_fn,
+    n_instruments: int = 1,
+    training:      bool = True,
 ) -> float:
     """Run one full pass over the data (train or eval).
 
@@ -336,6 +382,13 @@ def _run_epoch(
     once per epoch.
 
     For eval, runs the full dataset in one forward pass with no_grad.
+
+    Parameters
+    ----------
+    payoff_fn : callable
+        Takes the full paths_S batch ``(N, T+1)`` or ``(N, T+1, I)`` and
+        returns per-path payoff ``(N,)``. Encapsulates both the payoff type
+        (European / barrier) and the strike / barrier levels.
 
     Returns
     -------
@@ -347,7 +400,7 @@ def _run_epoch(
     if not training:
         # Full dataset in one forward pass
         deltas     = net.forward_trajectory(features)
-        payoff     = call_payoff(paths_S[:, -1], K)
+        payoff     = payoff_fn(paths_S)
         total_cost = proportional_cost(paths_S[:, :-1], deltas, epsilon=epsilon)
         pnl        = compute_pnl(paths_S, deltas, payoff, total_cost)
         return objective(pnl).item()
@@ -364,7 +417,7 @@ def _run_epoch(
 
         optimizer.zero_grad()
         deltas     = net.forward_trajectory(feat_b)
-        payoff     = call_payoff(S_b[:, -1], K)
+        payoff     = payoff_fn(S_b)
         total_cost = proportional_cost(S_b[:, :-1], deltas, epsilon=epsilon)
         pnl        = compute_pnl(S_b, deltas, payoff, total_cost)
         loss       = objective(pnl)
@@ -432,7 +485,7 @@ def _save_checkpoint(
     torch.save({
         "epoch":            epoch,
         "model_state_dict": net.state_dict(),
-        "objective_state":  objective.state_dict(),
+        "cvar_state_dict":  objective.state_dict(),
         "optimizer_state":  optimizer.state_dict(),
     }, path)
 
@@ -473,6 +526,14 @@ def _parse_args() -> TrainConfig:
                    help="Risk-aversion λ for mean_variance objective")
     p.add_argument("--out_root",            default="results/runs")
     p.add_argument("--device",              default="auto")
+    p.add_argument("--instrument",          default="single",
+                   choices=["single", "multi"],
+                   help="Hedging instrument mode. 'multi' requires --sim heston.")
+    p.add_argument("--payoff",              default="european",
+                   choices=["european", "barrier"],
+                   help="Option payoff type.")
+    p.add_argument("--barrier",             type=float, default=None,
+                   help="Barrier level B for up-and-out call. Required when --payoff barrier.")
 
     args = p.parse_args()
     d = vars(args)

@@ -22,6 +22,7 @@ from src.schema.v1_0 import (
     OBS_SCHEMA,
     LATENT_STATE_SCHEMA,
     CONTRACTS_SCHEMA,
+    VARIANCE_SWAP_SCHEMA,
 )
 from src.io.parquet_writer import write_parquet_part
 from src.utils.split import SplitConfig, split_path_ids
@@ -195,7 +196,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             n_paths=args.n_paths,
             seed=args.seed,
         )
-        obs, latent_state = simulate_heston(sim_cfg)
+        obs, latent_state, variance_swap = simulate_heston(sim_cfg)
         simulator_name = "Heston"
         simulator_params = asdict(sim_cfg)
 
@@ -232,6 +233,14 @@ def main(argv: Sequence[str] | None = None) -> Path:
         )
     latent_state = latent_state.loc[:, latent_cols].copy()
 
+    if args.sim == "heston":
+        vs_cols = [f.name for f in VARIANCE_SWAP_SCHEMA]
+        if set(variance_swap.columns) != set(vs_cols):
+            raise ValueError(
+                f"Variance-swap columns mismatch. expected={vs_cols}, got={list(variance_swap.columns)}"
+            )
+        variance_swap = variance_swap.loc[:, vs_cols].copy()
+
     # Split path IDs once, then write each split to train/val/test folders.
     splits = split_path_ids(n_paths=args.n_paths, seed=args.seed, cfg=split_cfg)
 
@@ -248,6 +257,16 @@ def main(argv: Sequence[str] | None = None) -> Path:
             schema=LATENT_STATE_SCHEMA,
             compression="zstd",
         )
+
+        if args.sim == "heston":
+            split_vs_df = variance_swap[variance_swap["path_id"].isin(ids)].loc[:, vs_cols].copy()
+            vs_out_dir = run_dir / "variance_swap" / split_name  # train/val/test
+            write_parquet_part(
+                split_vs_df,
+                out_dir=vs_out_dir,
+                schema=VARIANCE_SWAP_SCHEMA,
+                compression="zstd",
+            )
 
     # Persist single-contract metadata and run-level metadata.json.
     write_contracts(run_dir / "contracts.parquet", args.contract_type, args.strike, args.maturity_years)

@@ -62,7 +62,7 @@ class HestonParams:
     seed: int = 42
 
 
-def simulate_observations(cfg: HestonParams) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def simulate_observations(cfg: HestonParams) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Simulate Heston spot/variance paths and return canonical tables.
 
     Parameters
@@ -72,11 +72,12 @@ def simulate_observations(cfg: HestonParams) -> tuple[pd.DataFrame, pd.DataFrame
 
     Returns
     -------
-    tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
-        Three long-format tables:
+    tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]
+        Four long-format tables:
         ``observations`` with ``path_id, t_idx, t_years, S``;
-        ``latent_state`` with ``path_id, t_idx, v``; and
-        ``variance_swap`` with ``path_id, t_idx, S2``.
+        ``latent_state`` with ``path_id, t_idx, v``;
+        ``variance_swap`` with ``path_id, t_idx, S2``; and
+        ``path_statistics`` with ``path_id, t_idx, running_mean, running_min``.
 
     Notes
     -----
@@ -168,4 +169,21 @@ def simulate_observations(cfg: HestonParams) -> tuple[pd.DataFrame, pd.DataFrame
     variance_swap_df["t_idx"] = variance_swap_df["t_idx"].astype("int32")
     variance_swap_df["S2"] = variance_swap_df["S2"].astype("float32")
 
-    return df, latent_df, variance_swap_df
+    # Running path statistics computed over S[:, 0:t+1] at each timestep t.
+    S_f32 = S.astype(np.float32)
+    counts = np.arange(1, cfg.n_steps + 2, dtype=np.float64)  # [1, 2, ..., T+1]
+    running_mean = (np.cumsum(S_f32, axis=1) / counts).astype(np.float32)
+    running_min  = np.minimum.accumulate(S_f32, axis=1).astype(np.float32)
+
+    path_stats_df = pd.DataFrame({
+        "path_id":      path_id,
+        "t_idx":        t_idx,
+        "running_mean": running_mean.reshape(-1),
+        "running_min":  running_min.reshape(-1),
+    })
+    path_stats_df["path_id"]      = path_stats_df["path_id"].astype("int64")
+    path_stats_df["t_idx"]        = path_stats_df["t_idx"].astype("int32")
+    path_stats_df["running_mean"] = path_stats_df["running_mean"].astype("float32")
+    path_stats_df["running_min"]  = path_stats_df["running_min"].astype("float32")
+
+    return df, latent_df, variance_swap_df, path_stats_df

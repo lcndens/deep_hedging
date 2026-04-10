@@ -23,6 +23,7 @@ from src.schema.v1_0 import (
     LATENT_STATE_SCHEMA,
     CONTRACTS_SCHEMA,
     VARIANCE_SWAP_SCHEMA,
+    PATH_STATISTICS_SCHEMA,
 )
 from src.io.parquet_writer import write_parquet_part
 from src.utils.split import SplitConfig, split_path_ids
@@ -178,7 +179,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             n_paths=args.n_paths,
             seed=args.seed,
         )
-        obs, latent_state = simulate_bs(sim_cfg)
+        obs, latent_state, path_statistics = simulate_bs(sim_cfg)
         simulator_name = "BS"
         simulator_params = asdict(sim_cfg)
 
@@ -196,7 +197,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             n_paths=args.n_paths,
             seed=args.seed,
         )
-        obs, latent_state, variance_swap = simulate_heston(sim_cfg)
+        obs, latent_state, variance_swap, path_statistics = simulate_heston(sim_cfg)
         simulator_name = "Heston"
         simulator_params = asdict(sim_cfg)
 
@@ -213,7 +214,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             n_paths=args.n_paths,
             seed=args.seed,
         )
-        obs, latent_state = simulate_nga(sim_cfg)
+        obs, latent_state, path_statistics = simulate_nga(sim_cfg)
         simulator_name = "NGA"
         simulator_params = asdict(sim_cfg)
 
@@ -241,6 +242,13 @@ def main(argv: Sequence[str] | None = None) -> Path:
             )
         variance_swap = variance_swap.loc[:, vs_cols].copy()
 
+    ps_cols = [f.name for f in PATH_STATISTICS_SCHEMA]
+    if set(path_statistics.columns) != set(ps_cols):
+        raise ValueError(
+            f"Path-statistics columns mismatch. expected={ps_cols}, got={list(path_statistics.columns)}"
+        )
+    path_statistics = path_statistics.loc[:, ps_cols].copy()
+
     # Split path IDs once, then write each split to train/val/test folders.
     splits = split_path_ids(n_paths=args.n_paths, seed=args.seed, cfg=split_cfg)
 
@@ -267,6 +275,15 @@ def main(argv: Sequence[str] | None = None) -> Path:
                 schema=VARIANCE_SWAP_SCHEMA,
                 compression="zstd",
             )
+
+        split_ps_df = path_statistics[path_statistics["path_id"].isin(ids)].loc[:, ps_cols].copy()
+        ps_out_dir = run_dir / "path_statistics" / split_name  # train/val/test
+        write_parquet_part(
+            split_ps_df,
+            out_dir=ps_out_dir,
+            schema=PATH_STATISTICS_SCHEMA,
+            compression="zstd",
+        )
 
     # Persist single-contract metadata and run-level metadata.json.
     write_contracts(run_dir / "contracts.parquet", args.contract_type, args.strike, args.maturity_years)

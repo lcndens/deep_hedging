@@ -54,6 +54,9 @@ from src.io.dataset_loader import DatasetBatch, load_dataset
 from src.state.builder import build_features
 from src.derivatives.european import call_payoff
 from src.derivatives.barrier import compute_barrier_payoff
+from src.derivatives.asian import asian_call_payoff
+from src.derivatives.lookback import lookback_call_payoff
+from src.derivatives.binary import binary_call_payoff
 from src.frictions.proportional import proportional_cost
 from src.pnl.compute import compute_pnl
 from src.policy.baseline_feedforward_network import BaselineFeedforwardNetwork
@@ -124,6 +127,7 @@ class TrainConfig:
     instrument:           str       = "single"
     payoff:               str       = "european"
     barrier:              Optional[float] = None
+    cash:                 float     = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -193,8 +197,18 @@ def train(cfg: TrainConfig) -> TrainResult:
 
     # --- Pre-compute features (CPU RAM) ---
     logger.info("Building features...")
-    train_features = build_features(train_batch, n_instruments=n_instruments)
-    val_features   = build_features(val_batch,   n_instruments=n_instruments)
+    train_features = build_features(
+        train_batch,
+        n_instruments=n_instruments,
+        payoff=cfg.payoff,
+        barrier_level=cfg.barrier,
+    )
+    val_features = build_features(
+        val_batch,
+        n_instruments=n_instruments,
+        payoff=cfg.payoff,
+        barrier_level=cfg.barrier,
+    )
 
     # --- Move full datasets to device ---
     train_features = train_features.to(device)
@@ -217,20 +231,37 @@ def train(cfg: TrainConfig) -> TrainResult:
 
     # --- Build payoff function ---
     # payoff_fn takes the full paths_S batch ((N, T+1) or (N, T+1, I)) and
-    # returns per-path payoff (N,). Barrier check runs on the spot sub-path.
+    # returns per-path payoff (N,). Path-dependent payoffs operate on the
+    # spot sub-path; terminal payoffs use only the last column.
+    _K    = K
+    _cash = cfg.cash
+    _B    = cfg.barrier
+
     if cfg.payoff == "barrier":
-        _B = cfg.barrier
         def payoff_fn(S_full: torch.Tensor) -> torch.Tensor:
             spot = S_full[:, :, 0] if n_instruments == 2 else S_full
-            return compute_barrier_payoff(spot, K, _B)
-    else:
+            return compute_barrier_payoff(spot, _K, _B)
+    elif cfg.payoff == "asian":
+        def payoff_fn(S_full: torch.Tensor) -> torch.Tensor:
+            spot = S_full[:, :, 0] if n_instruments == 2 else S_full
+            return asian_call_payoff(spot, _K)
+    elif cfg.payoff == "lookback":
+        def payoff_fn(S_full: torch.Tensor) -> torch.Tensor:
+            spot = S_full[:, :, 0] if n_instruments == 2 else S_full
+            return lookback_call_payoff(spot, _K)
+    elif cfg.payoff == "binary":
         def payoff_fn(S_full: torch.Tensor) -> torch.Tensor:
             S_T = S_full[:, -1, 0] if n_instruments == 2 else S_full[:, -1]
-            return call_payoff(S_T, K)
+            return binary_call_payoff(S_T, _K, cash=_cash)
+    else:  # european
+        def payoff_fn(S_full: torch.Tensor) -> torch.Tensor:
+            S_T = S_full[:, -1, 0] if n_instruments == 2 else S_full[:, -1]
+            return call_payoff(S_T, _K)
 
     # --- Build model and objective ---
+    n_features = train_features.shape[2]
     net = BaselineFeedforwardNetwork(
-        hidden=cfg.hidden, n_instruments=n_instruments
+        hidden=cfg.hidden, n_instruments=n_instruments, feature_dim=n_features
     ).to(device)
     objective = _build_objective(cfg).to(device)
 
@@ -530,10 +561,12 @@ def _parse_args() -> TrainConfig:
                    choices=["single", "multi"],
                    help="Hedging instrument mode. 'multi' requires --sim heston.")
     p.add_argument("--payoff",              default="european",
-                   choices=["european", "barrier"],
+                   choices=["european", "barrier", "asian", "lookback", "binary"],
                    help="Option payoff type.")
     p.add_argument("--barrier",             type=float, default=None,
                    help="Barrier level B for up-and-out call. Required when --payoff barrier.")
+    p.add_argument("--cash",                type=float, default=1.0,
+                   help="Fixed cash payment for binary call. Used when --payoff binary.")
 
     args = p.parse_args()
     d = vars(args)

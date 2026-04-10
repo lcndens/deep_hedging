@@ -40,9 +40,21 @@ class BaselineFeedforwardNetwork(nn.Module):
         Number of hedging instruments.  Must be 1 or 2.
         ``1`` (default): scalar delta per step, trajectory shape ``(N, T)``.
         ``2``: two deltas per step, trajectory shape ``(N, T, 2)``.
+    feature_dim : int or None, optional
+        Number of state features produced by ``build_features``.  When
+        ``None`` (default), uses ``FEATURE_DIM + (n_instruments - 1)`` —
+        the standard formula for European payoffs — so existing code that
+        does not pass this argument is unaffected.  Pass the actual
+        ``features.shape[2]`` value from the trainer when using non-European
+        payoffs that produce a different number of features.
     """
 
-    def __init__(self, hidden: int = 64, n_instruments: int = 1) -> None:
+    def __init__(
+        self,
+        hidden:        int = 64,
+        n_instruments: int = 1,
+        feature_dim:   int | None = None,
+    ) -> None:
         """Initialise the baseline hedge policy network.
 
         Parameters
@@ -51,21 +63,31 @@ class BaselineFeedforwardNetwork(nn.Module):
             Width of both hidden layers.
         n_instruments : int, default=1
             Number of hedging instruments (1 or 2).
+        feature_dim : int or None, default=None
+            Override for the number of state features.  Defaults to
+            ``FEATURE_DIM + (n_instruments - 1)`` when ``None``.
         """
         if n_instruments not in (1, 2):
             raise ValueError(
                 f"n_instruments must be 1 or 2, got {n_instruments}."
             )
         super().__init__()
-        self.hidden       = hidden
+        self.hidden        = hidden
         self.n_instruments = n_instruments
 
         # Number of state features fed in by build_features.
-        n_features = FEATURE_DIM + (n_instruments - 1)   # 3 or 4
+        # Use the caller-supplied value when provided; otherwise fall back to
+        # the standard formula so existing code (and tests) are unaffected.
+        n_features = (
+            feature_dim
+            if feature_dim is not None
+            else FEATURE_DIM + (n_instruments - 1)
+        )
+        self.expected_feat_dim = n_features
 
         # input  = state features + one prev-delta per instrument
         # output = one delta per instrument
-        self.input_dim  = n_features + n_instruments      # 4 or 6
+        self.input_dim  = n_features + n_instruments
         self.output_dim = n_instruments                   # 1 or 2
 
         self.net = nn.Sequential(
@@ -118,8 +140,7 @@ class BaselineFeedforwardNetwork(nn.Module):
             If the feature tensor rank, feature dimension, or values are
             invalid.
         """
-        expected_feat_dim = FEATURE_DIM + (self.n_instruments - 1)
-        _validate_features(features, expected_feat_dim)
+        _validate_features(features, self.expected_feat_dim)
 
         N, T, F = features.shape
         device  = features.device

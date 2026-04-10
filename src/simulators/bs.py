@@ -46,7 +46,7 @@ class BSParams:
     seed: int = 42
 
 
-def simulate_observations(cfg: BSParams) -> tuple[pd.DataFrame, pd.DataFrame]:
+def simulate_observations(cfg: BSParams) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Simulate Black-Scholes spot paths and format canonical output tables.
 
     Parameters
@@ -56,10 +56,11 @@ def simulate_observations(cfg: BSParams) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     Returns
     -------
-    tuple[pd.DataFrame, pd.DataFrame]
-        Two long-format tables:
-        ``observations`` with columns ``path_id, t_idx, t_years, S`` and
-        ``latent_state`` with columns ``path_id, t_idx, v``.
+    tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
+        Three long-format tables:
+        ``observations`` with columns ``path_id, t_idx, t_years, S``;
+        ``latent_state`` with columns ``path_id, t_idx, v``; and
+        ``path_statistics`` with columns ``path_id, t_idx, running_mean, running_min``.
 
     Notes
     -----
@@ -127,4 +128,20 @@ def simulate_observations(cfg: BSParams) -> tuple[pd.DataFrame, pd.DataFrame]:
     latent_df["t_idx"] = latent_df["t_idx"].astype("int32")
     latent_df["v"] = latent_df["v"].astype("float32")
 
-    return df, latent_df
+    # Running path statistics computed over S[:, 0:t+1] at each timestep t.
+    counts = np.arange(1, cfg.n_steps + 2, dtype=np.float64)  # [1, 2, ..., T+1]
+    running_mean = (np.cumsum(S, axis=1) / counts).astype(np.float32)
+    running_min  = np.minimum.accumulate(S, axis=1).astype(np.float32)
+
+    path_stats_df = pd.DataFrame({
+        "path_id":      path_id,
+        "t_idx":        t_idx,
+        "running_mean": running_mean.reshape(-1),
+        "running_min":  running_min.reshape(-1),
+    })
+    path_stats_df["path_id"]      = path_stats_df["path_id"].astype("int64")
+    path_stats_df["t_idx"]        = path_stats_df["t_idx"].astype("int32")
+    path_stats_df["running_mean"] = path_stats_df["running_mean"].astype("float32")
+    path_stats_df["running_min"]  = path_stats_df["running_min"].astype("float32")
+
+    return df, latent_df, path_stats_df

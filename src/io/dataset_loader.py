@@ -16,7 +16,13 @@ import pandas as pd
 import pyarrow.parquet as pq
 import torch
 
-from src.schema.v1_0 import OBS_SCHEMA, CONTRACTS_SCHEMA, LATENT_STATE_SCHEMA, VARIANCE_SWAP_SCHEMA
+from src.schema.v1_0 import (
+    OBS_SCHEMA,
+    CONTRACTS_SCHEMA,
+    LATENT_STATE_SCHEMA,
+    VARIANCE_SWAP_SCHEMA,
+    PATH_STATISTICS_SCHEMA,
+)
 
 # ---------------------------------------------------------------------------
 # Return type
@@ -38,6 +44,14 @@ class DatasetBatch:
     paths_S2 : torch.Tensor
         Variance swap price path with shape ``(N, T+1)`` and dtype ``float32``.
         Non-zero only for Heston datasets; zero elsewhere.
+    paths_running_mean : torch.Tensor
+        Running mean of spot with shape ``(N, T+1)`` and dtype ``float32``.
+        ``paths_running_mean[:, t] = mean(S[:, 0:t+1])``. Zero when
+        ``path_statistics/`` directory is absent.
+    paths_running_min : torch.Tensor
+        Running minimum of spot with shape ``(N, T+1)`` and dtype ``float32``.
+        ``paths_running_min[:, t] = min(S[:, 0:t+1])``. Zero when
+        ``path_statistics/`` directory is absent.
     K : float
         Option strike price.
     T_mat : float
@@ -50,15 +64,17 @@ class DatasetBatch:
         Parsed ``metadata.json`` content for logging and validation.
     """
 
-    paths_S:  torch.Tensor
-    paths_v:  torch.Tensor
-    paths_t:  torch.Tensor
-    paths_S2: torch.Tensor
-    K:        float
-    T_mat:    float
-    n_paths:  int
-    n_steps:  int
-    metadata: dict
+    paths_S:            torch.Tensor
+    paths_v:            torch.Tensor
+    paths_t:            torch.Tensor
+    paths_S2:           torch.Tensor
+    paths_running_mean: torch.Tensor
+    paths_running_min:  torch.Tensor
+    K:                  float
+    T_mat:              float
+    n_paths:            int
+    n_steps:            int
+    metadata:           dict
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +129,10 @@ def load_dataset(run_dir: Path | str, split: str) -> DatasetBatch:
     vs_path = run_dir / "variance_swap" / split / "part-00000.parquet"
     vs = _load_variance_swap(vs_path, obs)
 
+    # Path statistics written for all simulators; fallback returns zeros.
+    ps_path = run_dir / "path_statistics" / split / "part-00000.parquet"
+    ps = _load_path_statistics(ps_path, obs)
+
     # Join all columns onto observations by path/time index.
     merged = obs.merge(
         lat[["path_id", "t_idx", "v"]],
@@ -120,6 +140,10 @@ def load_dataset(run_dir: Path | str, split: str) -> DatasetBatch:
         how="left",
     ).merge(
         vs[["path_id", "t_idx", "S2"]],
+        on=["path_id", "t_idx"],
+        how="left",
+    ).merge(
+        ps[["path_id", "t_idx", "running_mean", "running_min"]],
         on=["path_id", "t_idx"],
         how="left",
     )
@@ -137,25 +161,29 @@ def load_dataset(run_dir: Path | str, split: str) -> DatasetBatch:
     N = n_rows // T1
 
     # Pivot long tables to dense path matrices.
-    S_arr  = merged["S"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
-    v_arr  = merged["v"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
-    t_arr  = merged["t_years"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
-    S2_arr = merged["S2"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
+    S_arr    = merged["S"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
+    v_arr    = merged["v"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
+    t_arr    = merged["t_years"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
+    S2_arr   = merged["S2"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
+    mean_arr = merged["running_mean"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
+    min_arr  = merged["running_min"].to_numpy(dtype=np.float32).reshape(N, T1).copy()
 
     # Validate basic numerical invariants before tensor conversion.
     _check_tensors(S_arr, v_arr, t_arr, T_mat, metadata, run_dir)
 
     # torch.from_numpy keeps data on CPU and avoids extra copies.
     return DatasetBatch(
-        paths_S  = torch.from_numpy(S_arr),
-        paths_v  = torch.from_numpy(v_arr),
-        paths_t  = torch.from_numpy(t_arr),
-        paths_S2 = torch.from_numpy(S2_arr),
-        K        = K,
-        T_mat    = T_mat,
-        n_paths  = N,
-        n_steps  = n_steps,
-        metadata = metadata,
+        paths_S            = torch.from_numpy(S_arr),
+        paths_v            = torch.from_numpy(v_arr),
+        paths_t            = torch.from_numpy(t_arr),
+        paths_S2           = torch.from_numpy(S2_arr),
+        paths_running_mean = torch.from_numpy(mean_arr),
+        paths_running_min  = torch.from_numpy(min_arr),
+        K                  = K,
+        T_mat              = T_mat,
+        n_paths            = N,
+        n_steps            = n_steps,
+        metadata           = metadata,
     )
 
 
@@ -382,6 +410,36 @@ def _load_variance_swap(vs_path: Path, obs: pd.DataFrame) -> pd.DataFrame:
         "path_id": obs["path_id"].to_numpy(),
         "t_idx":   obs["t_idx"].to_numpy(),
         "S2":      np.zeros(len(obs), dtype=np.float32),
+    })
+
+
+def _load_path_statistics(ps_path: Path, obs: pd.DataFrame) -> pd.DataFrame:
+    """Load path statistics or construct a zero fallback.
+
+    Parameters
+    ----------
+    ps_path : Path
+        Expected path-statistics parquet file path
+        (``run_dir/path_statistics/<split>/part-00000.parquet``).
+    obs : pd.DataFrame
+        Observations table used for path/time indices in fallback mode.
+
+    Returns
+    -------
+    pd.DataFrame
+        Path-statistics table with columns ``path_id``, ``t_idx``,
+        ``running_mean``, and ``running_min``. Returns zeros when the
+        ``path_statistics/`` directory is absent.
+    """
+    if ps_path.exists():
+        return _read_parquet(ps_path, PATH_STATISTICS_SCHEMA)
+
+    # Zero fallback for datasets generated before path statistics were added.
+    return pd.DataFrame({
+        "path_id":      obs["path_id"].to_numpy(),
+        "t_idx":        obs["t_idx"].to_numpy(),
+        "running_mean": np.zeros(len(obs), dtype=np.float32),
+        "running_min":  np.zeros(len(obs), dtype=np.float32),
     })
 
 

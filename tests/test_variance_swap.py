@@ -120,7 +120,7 @@ class TestPositivity:
     def test_nonnegative_with_simulated_heston_paths(self):
         """S2 must be >= 0 for every path and timestep under default Heston params."""
         cfg = HestonParams(n_paths=500, n_steps=30, seed=99)
-        _, _, variance_swap_df = simulate_observations(cfg)
+        _, _, variance_swap_df, _ = simulate_observations(cfg)
         assert (variance_swap_df["S2"].to_numpy() >= 0.0).all(), (
             "Variance swap price S2 must be non-negative"
         )

@@ -37,3 +37,11 @@ VARIANCE_SWAP_SCHEMA = pa.schema([
     ("t_idx",   pa.int32()),
     ("S2",      pa.float32()),
 ])
+
+# Running path statistics; written for all simulators.
+PATH_STATISTICS_SCHEMA = pa.schema([
+    ("path_id",      pa.int64()),
+    ("t_idx",        pa.int32()),
+    ("running_mean", pa.float32()),
+    ("running_min",  pa.float32()),
+])

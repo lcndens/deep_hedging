@@ -90,7 +90,7 @@ def _check_interval(lo: float, hi: float, name: str) -> None:
         raise ValueError(f"{name}: max < min ({hi} < {lo})")
 
 
-def simulate_observations(cfg: NGAParams) -> tuple[pd.DataFrame, pd.DataFrame]:
+def simulate_observations(cfg: NGAParams) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Simulate NGA paths and return canonical observation tables.
 
     Parameters
@@ -100,11 +100,12 @@ def simulate_observations(cfg: NGAParams) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     Returns
     -------
-    tuple[pd.DataFrame, pd.DataFrame]
-        Two long-format tables:
+    tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
+        Three long-format tables:
         ``observations`` with ``path_id, t_idx, t_years, S`` (where ``S`` stores
-        the simulated ``X_t`` values) and ``latent_state`` with ``path_id, t_idx,
-        v`` set to zero.
+        the simulated ``X_t`` values); ``latent_state`` with ``path_id, t_idx,
+        v`` set to zero; and ``path_statistics`` with ``path_id, t_idx,
+        running_mean, running_min``.
 
     Raises
     ------
@@ -182,4 +183,21 @@ def simulate_observations(cfg: NGAParams) -> tuple[pd.DataFrame, pd.DataFrame]:
     latent_df["t_idx"] = latent_df["t_idx"].astype("int32")
     latent_df["v"] = latent_df["v"].astype("float32")
 
-    return df, latent_df
+    # Running path statistics computed over X[:, 0:t+1] at each timestep t.
+    X_f32 = X.astype(np.float32)
+    counts = np.arange(1, cfg.n_steps + 2, dtype=np.float64)  # [1, 2, ..., T+1]
+    running_mean = (np.cumsum(X_f32, axis=1) / counts).astype(np.float32)
+    running_min  = np.minimum.accumulate(X_f32, axis=1).astype(np.float32)
+
+    path_stats_df = pd.DataFrame({
+        "path_id":      path_id,
+        "t_idx":        t_idx,
+        "running_mean": running_mean.reshape(-1),
+        "running_min":  running_min.reshape(-1),
+    })
+    path_stats_df["path_id"]      = path_stats_df["path_id"].astype("int64")
+    path_stats_df["t_idx"]        = path_stats_df["t_idx"].astype("int32")
+    path_stats_df["running_mean"] = path_stats_df["running_mean"].astype("float32")
+    path_stats_df["running_min"]  = path_stats_df["running_min"].astype("float32")
+
+    return df, latent_df, path_stats_df
